@@ -104,6 +104,7 @@ async function dbInit() {
     ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
     ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ;
+    ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT '';
     UPDATE whatsapp_notifications SET delivery_state='queued',next_attempt_at=NOW(),reason='retry_after_restart' WHERE delivery_state='sending';
     CREATE INDEX IF NOT EXISTS whatsapp_notifications_created_idx ON whatsapp_notifications(created_at DESC);
     CREATE INDEX IF NOT EXISTS whatsapp_notifications_queue_idx ON whatsapp_notifications(next_attempt_at) WHERE delivery_state='queued';
@@ -348,17 +349,18 @@ async function dispatchNotification(id) {
   if(!jid){await pool.query("UPDATE whatsapp_notifications SET delivery_state='skipped',reason='invalid_phone',next_attempt_at=NULL WHERE id=$1",[id]);return {sent:false,skipped:true,reason:"invalid_phone"};}
   try{
     const sent=await sendWhatsAppText(jid,packageStatusMessage(p,p.package_status));
-    await pool.query("UPDATE whatsapp_notifications SET delivery_state='sent',reason='sent',whatsapp_message_id=$2,next_attempt_at=NULL WHERE id=$1",[id,sent?.key?.id||""]);
+    await pool.query("UPDATE whatsapp_notifications SET delivery_state='sent',reason='sent',whatsapp_message_id=$2,next_attempt_at=NULL,last_error='' WHERE id=$1",[id,sent?.key?.id||""]);
     return {sent:true,reason:"sent"};
   }catch(error){
     const terminal=attempt>=RETRY_DELAYS_SECONDS.length;
     const delay=RETRY_DELAYS_SECONDS[Math.min(attempt-1,RETRY_DELAYS_SECONDS.length-1)];
     const reason=error.message.includes("no está conectado")?"whatsapp_offline_wait":"retry_scheduled";
     await pool.query(
-      `UPDATE whatsapp_notifications SET delivery_state=$2,reason=$3,next_attempt_at=$4 WHERE id=$1`,
-      [id,terminal?"failed":"queued",terminal?"retry_limit_reached":reason,terminal?null:new Date(Date.now()+delay*1000)]
+      `UPDATE whatsapp_notifications SET delivery_state=$2,reason=$3,next_attempt_at=$4,last_error=$5 WHERE id=$1`,
+      [id,terminal?"failed":"queued",terminal?"retry_limit_reached":reason,terminal?null:new Date(Date.now()+delay*1000),String(error.message||"Error desconocido").slice(0,500)]
     );
-    console.error(`Aviso WhatsApp ${id} falló en intento ${attempt}${terminal?"; agotó los reintentos":`; se reintentará en ${delay}s`}.`,error.message);
+    const outcome=terminal?"se agotaron los reintentos":`próximo intento en ${delay}s`;
+    console.error(`Aviso WhatsApp ${id} falló en intento ${attempt}; ${outcome}.`,error.message);
     return {sent:false,queued:!terminal,reason:terminal?"retry_limit_reached":reason};
   }
 }
@@ -385,7 +387,6 @@ async function notifyPackage(p, status) {
   }
   const jid=phoneToWhatsAppJid(p.phone);
   if(!jid){const result={sent:false,skipped:true,reason:"invalid_phone"};await saveWhatsAppNotification(p,status,result);return result;}
-  const queued={sent:false,queued:true,reason:"queued_for_delivery"};
   await pool.query("UPDATE whatsapp_notifications SET delivery_state='skipped',reason='superseded_by_new_status',next_attempt_at=NULL WHERE package_id=$1 AND delivery_state='queued'",[p.id]);
   const saved=await pool.query(
     `INSERT INTO whatsapp_notifications(package_id,package_status,delivery_state,reason,whatsapp_message_id,next_attempt_at)
@@ -407,7 +408,7 @@ app.post("/api/admin/packages/:id/notify", auth, adminOnly, asyncRoute(async (re
 
 app.get("/api/admin/whatsapp/notifications", auth, adminOnly, asyncRoute(async (req,res) => {
   const {rows}=await pool.query(
-    `SELECT n.id,n.package_status,n.delivery_state,n.reason,n.created_at,n.whatsapp_message_id,p.folio,p.tracking_code
+    `SELECT n.id,n.package_status,n.delivery_state,n.reason,n.created_at,n.whatsapp_message_id,n.attempt_count,n.last_error,p.folio,p.tracking_code
      FROM whatsapp_notifications n JOIN packages p ON p.id=n.package_id
      ORDER BY n.created_at DESC LIMIT 25`
   );
