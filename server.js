@@ -38,7 +38,7 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
 });
-const whatsappBot = new WhatsAppBot({ pool, onMessage: handleIncomingWhatsAppMessage });
+const whatsappBot = new WhatsAppBot({ pool, onMessage: handleIncomingWhatsAppMessage, onMessageUpdate: handleWhatsAppMessageUpdate });
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET.length < 32 || JWT_SECRET.includes("CAMBIA_ESTA")) {
@@ -90,6 +90,7 @@ async function dbInit() {
       payload TEXT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS whatsapp_message_receipts (message_id TEXT PRIMARY KEY,status SMALLINT NOT NULL,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
     CREATE TABLE IF NOT EXISTS whatsapp_notifications (
       id BIGSERIAL PRIMARY KEY,
       package_id BIGINT REFERENCES packages(id) ON DELETE CASCADE,
@@ -100,11 +101,13 @@ async function dbInit() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE whatsapp_notifications DROP CONSTRAINT IF EXISTS whatsapp_notifications_delivery_state_check;
-    ALTER TABLE whatsapp_notifications ADD CONSTRAINT whatsapp_notifications_delivery_state_check CHECK (delivery_state IN ('sent','failed','skipped','queued','sending'));
+    ALTER TABLE whatsapp_notifications ADD CONSTRAINT whatsapp_notifications_delivery_state_check CHECK (delivery_state IN ('sent','accepted','delivered','read','played','failed','skipped','queued','sending'));
     ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
     ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ;
     ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS last_error TEXT NOT NULL DEFAULT '';
+    ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS whatsapp_receipt_status SMALLINT;
+    UPDATE whatsapp_notifications SET delivery_state='accepted',reason='server_accepted_pending_receipt' WHERE delivery_state='sent';
     UPDATE whatsapp_notifications SET delivery_state='queued',next_attempt_at=NOW(),reason='retry_after_restart' WHERE delivery_state='sending';
     CREATE INDEX IF NOT EXISTS whatsapp_notifications_created_idx ON whatsapp_notifications(created_at DESC);
     CREATE INDEX IF NOT EXISTS whatsapp_notifications_queue_idx ON whatsapp_notifications(next_attempt_at) WHERE delivery_state='queued';
@@ -283,6 +286,30 @@ app.post("/api/lookup", rateLimit({ windowMs: 10*60_000, limit: 15 }), asyncRout
   res.json({package:rows[0]});
 }));
 
+const WHATSAPP_RECEIPT_STATES = { 2: "accepted", 3: "delivered", 4: "read", 5: "played" };
+async function handleWhatsAppMessageUpdate(messageId, status) {
+  if (status !== 0 && !WHATSAPP_RECEIPT_STATES[status]) return;
+  const { rows } = await pool.query(
+    `INSERT INTO whatsapp_message_receipts(message_id,status) VALUES($1,$2)
+     ON CONFLICT(message_id) DO UPDATE SET status=CASE
+       WHEN whatsapp_message_receipts.status=0 THEN EXCLUDED.status
+       WHEN EXCLUDED.status=0 THEN whatsapp_message_receipts.status
+       ELSE GREATEST(whatsapp_message_receipts.status,EXCLUDED.status) END,updated_at=NOW()
+     RETURNING status`, [messageId, status]
+  );
+  const effective = Number(rows[0]?.status);
+  const state = effective === 0 ? "failed" : WHATSAPP_RECEIPT_STATES[effective];
+  if (!state) return;
+  const reason = effective === 0 ? "delivery_rejected" : state === "accepted" ? "server_accepted_pending_receipt" : state;
+  await pool.query(
+    `UPDATE whatsapp_notifications SET delivery_state=$2,reason=$3,whatsapp_receipt_status=$4,
+       last_error=CASE WHEN $2='failed' THEN 'WhatsApp reportó un error de entrega.' ELSE '' END
+     WHERE whatsapp_message_id=$1 AND delivery_state NOT IN ('skipped','queued','sending')
+       AND (whatsapp_receipt_status IS NULL OR whatsapp_receipt_status < $4 OR (whatsapp_receipt_status=0 AND $4>0))`,
+    [messageId, state, reason, effective]
+  );
+}
+
 async function sendWhatsAppText(to, body) {
   return whatsappBot.sendText(to, body);
 }
@@ -349,8 +376,10 @@ async function dispatchNotification(id) {
   if(!jid){await pool.query("UPDATE whatsapp_notifications SET delivery_state='skipped',reason='invalid_phone',next_attempt_at=NULL WHERE id=$1",[id]);return {sent:false,skipped:true,reason:"invalid_phone"};}
   try{
     const sent=await sendWhatsAppText(jid,packageStatusMessage(p,p.package_status));
-    await pool.query("UPDATE whatsapp_notifications SET delivery_state='sent',reason='sent',whatsapp_message_id=$2,next_attempt_at=NULL,last_error='' WHERE id=$1",[id,sent?.key?.id||""]);
-    return {sent:true,reason:"sent"};
+    const messageId=sent?.key?.id||"";
+    await pool.query("UPDATE whatsapp_notifications SET delivery_state='accepted',reason='server_accepted_pending_receipt',whatsapp_message_id=$2,next_attempt_at=NULL,last_error='' WHERE id=$1",[id,messageId]);
+    if(messageId){const receipt=await pool.query("SELECT status FROM whatsapp_message_receipts WHERE message_id=$1",[messageId]);if(receipt.rows[0])await handleWhatsAppMessageUpdate(messageId,Number(receipt.rows[0].status));}
+    return {sent:true,accepted:true,reason:"server_accepted_pending_receipt"};
   }catch(error){
     const terminal=attempt>=RETRY_DELAYS_SECONDS.length;
     const delay=RETRY_DELAYS_SECONDS[Math.min(attempt-1,RETRY_DELAYS_SECONDS.length-1)];
@@ -403,12 +432,12 @@ app.post("/api/admin/packages/:id/notify", auth, adminOnly, asyncRoute(async (re
   const result = await notifyPackage(p, p.status);
   if(result.queued)return res.status(202).json({ok:true,queued:true,message:"Aviso guardado en cola. Se enviará automáticamente cuando WhatsApp vuelva a conectarse."});
   if(!result.sent)return res.status(503).json({error:result.reason==="invalid_phone"?"El teléfono guardado no tiene un formato válido.":"No se pudo enviar el aviso. Revisa la conexión de WhatsApp y los reintentos en el historial."});
-  res.json({ok:true,message:"Aviso enviado a WhatsApp."});
+  res.json({ok:true,message:"WhatsApp aceptó el aviso para enviarlo. La entrega al teléfono del cliente se confirmará en el historial cuando llegue el acuse."});
 }));
 
 app.get("/api/admin/whatsapp/notifications", auth, adminOnly, asyncRoute(async (req,res) => {
   const {rows}=await pool.query(
-    `SELECT n.id,n.package_status,n.delivery_state,n.reason,n.created_at,n.whatsapp_message_id,n.attempt_count,n.last_error,p.folio,p.tracking_code
+    `SELECT n.id,n.package_status,n.delivery_state,n.reason,n.created_at,n.whatsapp_message_id,n.whatsapp_receipt_status,n.attempt_count,n.last_error,p.folio,p.tracking_code
      FROM whatsapp_notifications n JOIN packages p ON p.id=n.package_id
      ORDER BY n.created_at DESC LIMIT 25`
   );
@@ -489,4 +518,6 @@ dbInit().then(() => {
   retryTimer.unref();
   void whatsappBot.resume();
 }).catch(err => { console.error("No se pudo iniciar la base de datos:",err); process.exit(1); });
+
+
 

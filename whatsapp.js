@@ -98,9 +98,10 @@ async function createAuthState(pool) {
 }
 
 export class WhatsAppBot {
-  constructor({ pool, onMessage }) {
+  constructor({ pool, onMessage, onMessageUpdate }) {
     this.pool = pool;
     this.onMessage = onMessage;
+    this.onMessageUpdate = onMessageUpdate;
     this.socket = null;
     this.reconnectTimer = null;
     this.reconnectEnabled = false;
@@ -156,6 +157,13 @@ export class WhatsAppBot {
     socket.ev.on("connection.update", update => { void this.handleConnectionUpdate(socket, update); });
     socket.ev.on("messages.upsert", event => {
       void this.handleMessages(event).catch(error => console.error("Error leyendo mensajes de WhatsApp:", error.message));
+    });
+    socket.ev.on("messages.update", updates => {
+      for (const item of updates || []) {
+        if (!item.key?.fromMe || !item.key?.id || !Number.isInteger(item.update?.status)) continue;
+        void Promise.resolve(this.onMessageUpdate?.(item.key.id, item.update.status, item.update))
+          .catch(error => console.error("No se pudo registrar la confirmación de entrega de WhatsApp:", error.message));
+      }
     });
   }
 
@@ -252,4 +260,8 @@ export function phoneToWhatsAppJid(value) {
   if (digits.length === 13 && digits.startsWith("521")) digits = `52${digits.slice(-10)}`;
   return digits ? `${digits}@s.whatsapp.net` : "";
 }
+
+
+
+
 

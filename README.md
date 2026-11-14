@@ -79,3 +79,8 @@ Este proyecto usa Baileys para vincular una sesión de WhatsApp Web desde el adm
 - El panel muestra en cola, enviando, enviado, fallido u omitido. **Reintentar pendientes y fallidos** procesa hasta cinco avisos por lote; el sistema aplica pausas entre envíos y reintentos escalonados.
 - Los estados antiguos pendientes se reemplazan por el último estado del paquete para evitar enviar novedades atrasadas.
 - La cola no anula la autorización del cliente. En Render Free el procesamiento se pausa cuando el servicio se suspende y continúa cuando vuelve a estar activo.
+
+
+### Confirmaciones de entrega
+El panel distingue entre aceptación por WhatsApp (`accepted`), entrega al dispositivo (`delivered`), lectura (`read`) y reproducción (`played`). La aceptación inicial de `sendMessage()` no se presenta como confirmación de recepción. Los acuses se vinculan al ID de mensaje y se conservan en PostgreSQL para manejar eventos que llegan antes de guardar la notificación.
+
