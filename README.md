@@ -72,3 +72,10 @@ Este proyecto usa Baileys para vincular una sesión de WhatsApp Web desde el adm
 - El administrador puede eliminar usuarios del equipo y paquetes desde sus tarjetas. Ambas acciones piden confirmación; al quitar un paquete se eliminan también sus eventos e historial de avisos vinculados.
 - La dirección de entrega admite texto o un enlace compartido de Google Maps. El botón del repartidor abre la ruta en Maps; las direcciones en texto se convierten en un destino de ruta.
 - La interfaz administrativa incluye navegación por resumen, registro, inventario, equipo y WhatsApp.
+
+
+## Cola y recuperación de avisos WhatsApp
+- Con autorización registrada, cada aviso se guarda primero en PostgreSQL. Si la sesión QR está desconectada, se queda en cola y se intenta al recuperar la conexión.
+- El panel muestra en cola, enviando, enviado, fallido u omitido. **Reintentar pendientes y fallidos** procesa hasta cinco avisos por lote; el sistema aplica pausas entre envíos y reintentos escalonados.
+- Los estados antiguos pendientes se reemplazan por el último estado del paquete para evitar enviar novedades atrasadas.
+- La cola no anula la autorización del cliente. En Render Free el procesamiento se pausa cuando el servicio se suspende y continúa cuando vuelve a estar activo.

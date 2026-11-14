@@ -174,11 +174,13 @@ export class WhatsAppBot {
     if (update.connection === "open") {
       const phone = String(socket.user?.id || "").split(":")[0].split("@")[0];
       this.status = { state: "connected", qr: null, qrExpiresAt: null, phone, message: "WhatsApp está conectado y el bot puede responder consultas." };
+      console.info(`WhatsApp conectado; cuenta terminada en ${phone.slice(-4)}.`);
     }
     if (update.connection === "close") {
       this.socket = null;
       this.status = { ...this.status, qr: null, qrExpiresAt: null, phone: null };
       const code = update.lastDisconnect?.error?.output?.statusCode;
+      console.warn(`Conexión WhatsApp cerrada (código ${code ?? "desconocido"}).`);
       if (code === DisconnectReason.loggedOut) {
         this.reconnectEnabled = false;
         await this.clearAuth();

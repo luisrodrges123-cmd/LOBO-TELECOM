@@ -99,7 +99,14 @@ async function dbInit() {
       whatsapp_message_id TEXT DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE whatsapp_notifications DROP CONSTRAINT IF EXISTS whatsapp_notifications_delivery_state_check;
+    ALTER TABLE whatsapp_notifications ADD CONSTRAINT whatsapp_notifications_delivery_state_check CHECK (delivery_state IN ('sent','failed','skipped','queued','sending'));
+    ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ;
+    ALTER TABLE whatsapp_notifications ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ;
+    UPDATE whatsapp_notifications SET delivery_state='queued',next_attempt_at=NOW(),reason='retry_after_restart' WHERE delivery_state='sending';
     CREATE INDEX IF NOT EXISTS whatsapp_notifications_created_idx ON whatsapp_notifications(created_at DESC);
+    CREATE INDEX IF NOT EXISTS whatsapp_notifications_queue_idx ON whatsapp_notifications(next_attempt_at) WHERE delivery_state='queued';
   `);
 }
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -310,13 +317,60 @@ function packageStatusMessage(p, status) {
 async function saveWhatsAppNotification(p, status, result, messageId="") {
   try {
     await pool.query(
-      `INSERT INTO whatsapp_notifications(package_id,package_status,delivery_state,reason,whatsapp_message_id)
-       VALUES($1,$2,$3,$4,$5)`,
-      [p.id,status,result.sent?"sent":result.skipped?"skipped":"failed",result.reason||"",messageId||""]
+      `INSERT INTO whatsapp_notifications(package_id,package_status,delivery_state,reason,whatsapp_message_id,next_attempt_at)
+       VALUES($1,$2,$3,$4,$5,$6)`,
+      [p.id,status,result.sent?"sent":result.skipped?"skipped":result.queued?"queued":"failed",result.reason||"",messageId||"",result.queued?new Date():null]
     );
   } catch(error) {
     console.error("No se pudo registrar el resultado del aviso de WhatsApp:",error.message);
   }
+}
+const RETRY_DELAYS_SECONDS=[60,300,900,1800,3600,7200];
+async function dispatchNotification(id) {
+  if(!whatsappBot.snapshot().connected)return {sent:false,queued:true,reason:"whatsapp_offline_wait"};
+  const claim=await pool.query(
+    `UPDATE whatsapp_notifications SET delivery_state='sending',attempt_count=attempt_count+1,last_attempt_at=NOW(),reason='sending'
+     WHERE id=$1 AND delivery_state='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=NOW()) RETURNING attempt_count`,[id]
+  );
+  if(!claim.rows.length)return {sent:false,queued:true,reason:"already_processing"};
+  const attempt=claim.rows[0].attempt_count;
+  const {rows}=await pool.query(
+    `SELECT n.id,n.package_status,p.* FROM whatsapp_notifications n JOIN packages p ON p.id=n.package_id WHERE n.id=$1`,[id]
+  );
+  const p=rows[0];
+  if(!p)return {sent:false,skipped:true,reason:"package_deleted"};
+  if(!p.whatsapp_opt_in||!p.phone){
+    const reason=!p.whatsapp_opt_in?"consent_revoked":"phone_missing";
+    await pool.query("UPDATE whatsapp_notifications SET delivery_state='skipped',reason=$2,next_attempt_at=NULL WHERE id=$1",[id,reason]);
+    return {sent:false,skipped:true,reason};
+  }
+  const jid=phoneToWhatsAppJid(p.phone);
+  if(!jid){await pool.query("UPDATE whatsapp_notifications SET delivery_state='skipped',reason='invalid_phone',next_attempt_at=NULL WHERE id=$1",[id]);return {sent:false,skipped:true,reason:"invalid_phone"};}
+  try{
+    const sent=await sendWhatsAppText(jid,packageStatusMessage(p,p.package_status));
+    await pool.query("UPDATE whatsapp_notifications SET delivery_state='sent',reason='sent',whatsapp_message_id=$2,next_attempt_at=NULL WHERE id=$1",[id,sent?.key?.id||""]);
+    return {sent:true,reason:"sent"};
+  }catch(error){
+    const terminal=attempt>=RETRY_DELAYS_SECONDS.length;
+    const delay=RETRY_DELAYS_SECONDS[Math.min(attempt-1,RETRY_DELAYS_SECONDS.length-1)];
+    const reason=error.message.includes("no está conectado")?"whatsapp_offline_wait":"retry_scheduled";
+    await pool.query(
+      `UPDATE whatsapp_notifications SET delivery_state=$2,reason=$3,next_attempt_at=$4 WHERE id=$1`,
+      [id,terminal?"failed":"queued",terminal?"retry_limit_reached":reason,terminal?null:new Date(Date.now()+delay*1000)]
+    );
+    console.error(`Aviso WhatsApp ${id} falló en intento ${attempt}${terminal?"; agotó los reintentos":`; se reintentará en ${delay}s`}.`,error.message);
+    return {sent:false,queued:!terminal,reason:terminal?"retry_limit_reached":reason};
+  }
+}
+async function dispatchQueuedNotifications(limit=5) {
+  if(!whatsappBot.snapshot().connected)return 0;
+  await pool.query("UPDATE whatsapp_notifications SET delivery_state='queued',next_attempt_at=NOW(),reason='recovered_stale_attempt' WHERE delivery_state='sending' AND last_attempt_at<NOW()-INTERVAL '5 minutes'");
+  const {rows}=await pool.query("SELECT id FROM whatsapp_notifications WHERE delivery_state='queued' AND (next_attempt_at IS NULL OR next_attempt_at<=NOW()) ORDER BY created_at ASC LIMIT $1",[limit]);
+  for(let i=0;i<rows.length;i++){
+    await dispatchNotification(rows[i].id);
+    if(i<rows.length-1)await new Promise(resolve=>setTimeout(resolve,1200));
+  }
+  return rows.length;
 }
 async function notifyPackage(p, status) {
   if (!p.whatsapp_opt_in) {
@@ -329,22 +383,15 @@ async function notifyPackage(p, status) {
     await saveWhatsAppNotification(p,status,result);
     return result;
   }
-  const jid = phoneToWhatsAppJid(p.phone);
-  if (!jid) {
-    const result={sent:false,skipped:true,reason:"invalid_phone"};
-    await saveWhatsAppNotification(p,status,result);
-    return result;
-  }
-  try {
-    const sent=await sendWhatsAppText(jid,packageStatusMessage(p,status));
-    const result={sent:true,reason:"sent"};
-    await saveWhatsAppNotification(p,status,result,sent?.key?.id||"");
-    return result;
-  } catch(error) {
-    const result={sent:false,reason:error.message.includes("no está conectado")?"whatsapp_not_connected":"whatsapp_send_failed"};
-    await saveWhatsAppNotification(p,status,result);
-    return result;
-  }
+  const jid=phoneToWhatsAppJid(p.phone);
+  if(!jid){const result={sent:false,skipped:true,reason:"invalid_phone"};await saveWhatsAppNotification(p,status,result);return result;}
+  const queued={sent:false,queued:true,reason:"queued_for_delivery"};
+  await pool.query("UPDATE whatsapp_notifications SET delivery_state='skipped',reason='superseded_by_new_status',next_attempt_at=NULL WHERE package_id=$1 AND delivery_state='queued'",[p.id]);
+  const saved=await pool.query(
+    `INSERT INTO whatsapp_notifications(package_id,package_status,delivery_state,reason,whatsapp_message_id,next_attempt_at)
+     VALUES($1,$2,'queued',$3,'',NOW()) RETURNING id`,[p.id,status,whatsappBot.snapshot().connected?"sending":"whatsapp_offline_wait"]
+  );
+  return dispatchNotification(saved.rows[0].id);
 }
 app.post("/api/admin/packages/:id/notify", auth, adminOnly, asyncRoute(async (req,res) => {
   const { rows } = await pool.query("SELECT * FROM packages WHERE id=$1",[Number(req.params.id)]);
@@ -353,8 +400,9 @@ app.post("/api/admin/packages/:id/notify", auth, adminOnly, asyncRoute(async (re
   if (!p.phone) return res.status(400).json({error:"Agrega el teléfono del destinatario primero."});
   if (!p.whatsapp_opt_in) return res.status(400).json({error:"Registra primero la autorización del destinatario para recibir mensajes por WhatsApp."});
   const result = await notifyPackage(p, p.status);
-  if (!result.sent) return res.status(503).json({error: result.reason === "whatsapp_not_connected" ? "Conecta WhatsApp escaneando el QR desde el administrador." : result.reason === "invalid_phone" ? "El teléfono guardado no tiene un formato válido." : "No se pudo enviar el aviso. Revisa la conexión de WhatsApp e inténtalo de nuevo."});
-  res.json({ok:true,message:"Solicitud enviada a WhatsApp."});
+  if(result.queued)return res.status(202).json({ok:true,queued:true,message:"Aviso guardado en cola. Se enviará automáticamente cuando WhatsApp vuelva a conectarse."});
+  if(!result.sent)return res.status(503).json({error:result.reason==="invalid_phone"?"El teléfono guardado no tiene un formato válido.":"No se pudo enviar el aviso. Revisa la conexión de WhatsApp y los reintentos en el historial."});
+  res.json({ok:true,message:"Aviso enviado a WhatsApp."});
 }));
 
 app.get("/api/admin/whatsapp/notifications", auth, adminOnly, asyncRoute(async (req,res) => {
@@ -364,6 +412,13 @@ app.get("/api/admin/whatsapp/notifications", auth, adminOnly, asyncRoute(async (
      ORDER BY n.created_at DESC LIMIT 25`
   );
   res.json({notifications:rows});
+}));
+app.post("/api/admin/whatsapp/retry-queue",auth,adminOnly,asyncRoute(async(req,res)=>{
+  const connected=whatsappBot.snapshot().connected;
+  if(connected)await pool.query(`WITH candidates AS (SELECT id FROM whatsapp_notifications WHERE delivery_state IN ('queued','failed') ORDER BY created_at ASC LIMIT 5) UPDATE whatsapp_notifications n SET delivery_state='queued',attempt_count=0,next_attempt_at=NOW(),reason='manual_retry' FROM candidates c WHERE n.id=c.id`);
+  const processed=await dispatchQueuedNotifications(5);
+  const {rows}=await pool.query("SELECT COUNT(*) FILTER(WHERE delivery_state='queued')::int AS pending,COUNT(*) FILTER(WHERE delivery_state='failed')::int AS failed FROM whatsapp_notifications");
+  res.json({connected,processed,pending:rows[0].pending,failed:rows[0].failed,message:connected?`Se procesaron ${processed} avisos. Pendientes: ${rows[0].pending}; fallidos: ${rows[0].failed}.`:"WhatsApp está desconectado. Los avisos quedan en cola; conecta el QR para reintentarlos."});
 }));
 app.get("/api/admin/whatsapp/status", auth, adminOnly, (req,res) => res.json(whatsappBot.snapshot()));
 app.post("/api/admin/whatsapp/connect", auth, adminOnly, asyncRoute(async (req,res) => {
@@ -429,6 +484,8 @@ app.use((err,req,res,next) => {
 const port = Number(process.env.PORT || 3000);
 dbInit().then(() => {
   app.listen(port, () => console.log(`LOBO TELECOM activo en puerto ${port}`));
+  const retryTimer=setInterval(()=>dispatchQueuedNotifications().catch(error=>console.error("No se pudo procesar la cola de WhatsApp:",error.message)),15000);
+  retryTimer.unref();
   void whatsappBot.resume();
 }).catch(err => { console.error("No se pudo iniciar la base de datos:",err); process.exit(1); });
 
