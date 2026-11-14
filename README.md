@@ -34,7 +34,7 @@ No uses la contraseña de ejemplo. Genera un `JWT_SECRET` largo y único. No sub
 - Crea un proyecto PostgreSQL gratuito en Neon y copia la cadena de conexión **pooled** del proyecto.
 - Usa el Blueprint `render.yaml` para desplegar el Web Service gratuito conectado a este repositorio.
 - Al revisar la sincronización, configura `DATABASE_URL` con la cadena de Neon. No la subas a GitHub.
-- Render genera `JWT_SECRET` y `ADMIN_PASSWORD) de forma segura. Consulta la contraseña en Environment en el panel de Render; el usuario es `Angelito`.
+- Render genera `JWT_SECRET` y `ADMIN_PASSWORD` de forma segura. Consulta la contraseña en Environment en el panel de Render; el usuario es `Angelito`.
 - `DATABASE_SSL=true` está configurado en el Blueprint.
 - Render gratuito puede suspender la web tras inactividad; Neon Free tiene límites mensuales y puede suspender conexiones al agotarlos.
 
