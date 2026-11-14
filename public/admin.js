@@ -3,7 +3,8 @@ let token=localStorage.getItem("lobo_admin_token")||"";
 let scanner=null, scanning=false, packages=[];
 const headers=()=>({"Content-Type":"application/json","Authorization":`Bearer ${token}`});
 function message(el,text,error=false){el.textContent=text;el.className="result "+(error?"error":"success");}
-function showDashboard(){ $("#loginView").hidden=true; $("#dashboard").hidden=false; loadPackages(); loadWhatsAppStatus(); }
+function notificationNote(n){if(!n)return"";if(n.sent)return" Aviso de WhatsApp enviado.";if(n.reason==="consent_required")return" No se envió WhatsApp: falta autorización del cliente.";if(n.reason==="phone_missing")return" No se envió WhatsApp: falta el teléfono del cliente.";if(n.reason==="whatsapp_not_connected")return" Conecta WhatsApp con el QR para enviar el aviso.";if(n.reason==="invalid_phone")return" No se pudo enviar: el teléfono no es válido.";if(n.reason==="whatsapp_send_failed")return" El aviso no salió; revisa la conexión y consulta el historial.";return"";}
+function showDashboard(){ $("#loginView").hidden=true; $("#dashboard").hidden=false; loadPackages(); loadWhatsAppStatus(); loadWhatsAppHistory(); }
 if(token) showDashboard();
 $("#loginForm").addEventListener("submit",async e=>{
  e.preventDefault(); const out=$("#loginMsg"); message(out,"Validando acceso...");
@@ -13,6 +14,15 @@ $("#loginForm").addEventListener("submit",async e=>{
 $("#logoutBtn").onclick=()=>{localStorage.removeItem("lobo_admin_token");token="";$("#dashboard").hidden=true;$("#loginView").hidden=false;};
 async function api(url,opts={}){const r=await fetch(url,{...opts,headers:{...headers(),...(opts.headers||{})}});const d=await r.json();if(r.status===401){$("#logoutBtn").click();throw Error("Tu sesión expiró.");}if(!r.ok)throw Error(d.error||"Error en la solicitud.");return d;}
 let waPollTimer=null;
+async function loadWhatsAppHistory(){
+ try{
+  const d=await api("/api/admin/whatsapp/notifications"),list=$("#waNotificationHistory");
+  const states={sent:"Enviado",failed:"No enviado",skipped:"Omitido"};
+  const reasons={consent_required:"Sin autorización del cliente",phone_missing:"Falta el teléfono",invalid_phone:"Teléfono no válido",whatsapp_not_connected:"Bot desconectado",whatsapp_send_failed:"Error al enviar",sent:"Enviado a WhatsApp"};
+  list.innerHTML=d.notifications.length?d.notifications.map(n=>`<article class="wa-history-item"><div class="wa-history-icon ${esc(n.delivery_state)}">${n.delivery_state==="sent"?"✓":n.delivery_state==="skipped"?"–":"!"}</div><div class="wa-history-copy"><strong>${esc(n.folio)} · ${esc(n.tracking_code)}</strong><span>${esc(labelsForStatus(n.package_status))} · ${esc(reasons[n.reason]||n.reason||"")}</span></div><div class="wa-history-meta"><b class="wa-state-${esc(n.delivery_state)}">${states[n.delivery_state]||n.delivery_state}</b><time>${new Date(n.created_at).toLocaleString("es-MX")}</time></div></article>`).join(""):'<div class="wa-history-empty">Aún no hay avisos registrados.</div>';
+ }catch(e){$("#waNotificationHistory").innerHTML=`<div class="wa-history-empty">${esc(e.message)}</div>`;}
+}
+function labelsForStatus(status){return({received:"Recibido",ready:"Listo para recoger",delivered:"Entregado",issue:"Incidencia"})[status]||status;}
 async function loadWhatsAppStatus(){
  try{
   const d=await api("/api/admin/whatsapp/status"),badge=$("#botBadge"),status=$("#botStatus"),qr=$("#botQr"),placeholder=$("#botQrPlaceholder"),connect=$("#connectWhatsapp"),disconnect=$("#disconnectWhatsapp");
@@ -28,6 +38,7 @@ async function loadWhatsAppStatus(){
   if(["qr","connecting","reconnecting"].includes(d.state))waPollTimer=setTimeout(loadWhatsAppStatus,2000);
  }catch(e){$("#botStatus").textContent=e.message;}
 }
+$("#refreshWaHistory").onclick=loadWhatsAppHistory;
 $("#connectWhatsapp").addEventListener("click",async()=>{
  const button=$("#connectWhatsapp");button.disabled=true;message($("#botStatus"),"Preparando la conexión segura con WhatsApp…");
  try{await api("/api/admin/whatsapp/connect",{method:"POST",body:"{}"});await loadWhatsAppStatus();}
@@ -51,14 +62,14 @@ function render(){
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 $("#packageForm").addEventListener("submit",async e=>{
  e.preventDefault();const out=$("#saveMsg");message(out,"Guardando paquete...");
- try{const d=await api("/api/admin/packages",{method:"POST",body:JSON.stringify({tracking_code:$("#tracking").value,recipient_name:$("#recipient").value,phone:$("#phone").value,carrier:$("#carrier").value,notes:$("#notes").value,whatsapp_opt_in:$("#whatsappOptIn").checked})});const note=d.notification?.sent?" Aviso de WhatsApp enviado.":d.notification?.reason==="whatsapp_not_connected"?" Conecta WhatsApp con el QR para enviar avisos.":"";message(out,`Paquete guardado. Folio generado: ${d.package.folio}.${note}`);$("#packageForm").reset();await loadPackages();}
+ try{const d=await api("/api/admin/packages",{method:"POST",body:JSON.stringify({tracking_code:$("#tracking").value,recipient_name:$("#recipient").value,phone:$("#phone").value,carrier:$("#carrier").value,notes:$("#notes").value,whatsapp_opt_in:$("#whatsappOptIn").checked})});const note=notificationNote(d.notification);message(out,`Paquete guardado. Folio generado: ${d.package.folio}.${note}`);$("#packageForm").reset();await loadPackages();await loadWhatsAppHistory();}
  catch(err){message(out,err.message,true);}
 });
 $("#packageList").addEventListener("click",async e=>{
  const save=e.target.closest("[data-save]"),notify=e.target.closest("[data-notify]");
  try{
-  if(save){const id=save.dataset.save,status=document.querySelector(`[data-status="${id}"]`).value;await api(`/api/admin/packages/${id}`,{method:"PATCH",body:JSON.stringify({status})});await loadPackages();}
-  if(notify){const d=await api(`/api/admin/packages/${notify.dataset.notify}/notify`,{method:"POST",body:"{}"});alert(d.message);}
+  if(save){const id=save.dataset.save,status=document.querySelector(`[data-status="${id}"]`).value;const d=await api(`/api/admin/packages/${id}`,{method:"PATCH",body:JSON.stringify({status})});await loadPackages();await loadWhatsAppHistory();const note=notificationNote(d.notification);message($("#saveMsg"),`Estado actualizado.${note}`);}
+  if(notify){const d=await api(`/api/admin/packages/${notify.dataset.notify}/notify`,{method:"POST",body:"{}"});alert(d.message);await loadWhatsAppHistory();}
  }catch(err){alert(err.message);}
 });
 $("#refreshBtn").onclick=loadPackages;$("#search").addEventListener("input",debounce(loadPackages,350));$("#statusFilter").onchange=loadPackages;

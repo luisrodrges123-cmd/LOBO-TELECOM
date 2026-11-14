@@ -44,6 +44,7 @@ Este proyecto usa Baileys para vincular una sesión de WhatsApp Web desde el adm
 3. En el teléfono del negocio, abre WhatsApp → **Dispositivos vinculados** → **Vincular un dispositivo** y escanea el QR que aparece en el panel.
 4. El panel muestra el estado de conexión. El bot responde consultas por folio o número de seguimiento, solo si el remitente coincide con el teléfono registrado. Los avisos salientes de paquetes siguen requiriendo consentimiento del destinatario.
 5. La sesión y sus claves se guardan cifradas con AES-256-GCM en PostgreSQL, para no depender del disco temporal del hosting.
+6. Al recibir un paquete o cambiarlo a listo, entregado o incidencia, el bot envía un aviso personalizado. El panel registra los envíos, los omitidos por falta de consentimiento y los fallidos para facilitar el seguimiento.
 
 **Limitaciones:** Baileys es una librería comunitaria, no oficial de WhatsApp ni de Meta. Úsala bajo tu propio criterio, evita mensajes masivos y considera el riesgo de desconexiones o restricciones del número. Render gratuito puede suspender el servicio por inactividad; el bot intentará reconectar al despertar, pero puede tardar. Para operación crítica o comercial a escala, usa la API oficial de WhatsApp Business.
 

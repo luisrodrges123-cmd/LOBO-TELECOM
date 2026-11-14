@@ -83,6 +83,16 @@ async function dbInit() {
       payload TEXT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS whatsapp_notifications (
+      id BIGSERIAL PRIMARY KEY,
+      package_id BIGINT REFERENCES packages(id) ON DELETE CASCADE,
+      package_status TEXT NOT NULL,
+      delivery_state TEXT NOT NULL CHECK (delivery_state IN ('sent','failed','skipped')),
+      reason TEXT NOT NULL DEFAULT '',
+      whatsapp_message_id TEXT DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS whatsapp_notifications_created_idx ON whatsapp_notifications(created_at DESC);
   `);
 }
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -154,7 +164,7 @@ app.post("/api/admin/packages", auth, asyncRoute(async (req,res) => {
     } finally {
       client.release();
     }
-    const notification = whatsappOptIn && phone ? await notifyPackage(rows[0], "received") : { sent: false, reason: "consent_required" };
+    const notification = await notifyPackage(rows[0], "received");
     res.status(201).json({ package: rows[0], notification });
   } catch (e) {
     if (e.code === "23505") return res.status(409).json({ error:"Ese número de seguimiento ya está registrado." });
@@ -199,10 +209,8 @@ app.patch("/api/admin/packages/:id", auth, asyncRoute(async (req,res) => {
   } finally {
     client.release();
   }
-  let notification = { sent: false, reason: "status_unchanged_or_consent_required" };
-  if (status !== previous.status && rows[0].whatsapp_opt_in && rows[0].phone) {
-    notification = await notifyPackage(rows[0], status);
-  }
+  let notification = { sent: false, reason: "status_unchanged" };
+  if (status !== previous.status) notification = await notifyPackage(rows[0], status);
   res.json({package:rows[0], notification});
 }));
 
@@ -226,16 +234,72 @@ app.post("/api/lookup", rateLimit({ windowMs: 10*60_000, limit: 15 }), asyncRout
 async function sendWhatsAppText(to, body) {
   return whatsappBot.sendText(to, body);
 }
-async function notifyPackage(p, status) {
-  if (!p.whatsapp_opt_in || !p.phone) return { sent: false, reason: "consent_required" };
-  const jid = phoneToWhatsAppJid(p.phone);
-  if (!jid) return { sent: false, reason: "invalid_phone" };
-  const state = status === "delivered" ? "entregado" : status === "ready" ? "listo para recoger" : status === "issue" ? "con una incidencia que requiere atención" : "recibido en LOBO TELECOM";
+function packageStatusMessage(p, status) {
+  const updates={
+    received:{label:"Recibido en sucursal",body:"Hemos recibido tu paquete en LOBO TELECOM. Te avisaremos por este medio cuando esté listo para recoger."},
+    ready:{label:"Listo para recoger",body:"¡Tu paquete ya está listo! Cuando acudas, presenta tu folio al personal de LOBO TELECOM."},
+    delivered:{label:"Entregado",body:"El paquete se registró como entregado. Si no lo recibiste, responde con tu folio para revisar el caso."},
+    issue:{label:"Incidencia en seguimiento",body:"Detectamos una incidencia con tu paquete. Nuestro equipo dará seguimiento; responde con tu folio para consultar el caso."}
+  };
+  const update=updates[status]||updates.received;
+  const customer=clean(p.recipient_name,80);
+  const received=new Intl.DateTimeFormat("es-MX",{dateStyle:"medium",timeZone:"America/Chihuahua"}).format(new Date(p.received_at));
+  return [
+    "🐺 *LOBO TELECOM*",
+    "_Atención VIP · Seguimiento personalizado_",
+    "",
+    `Hola${customer?` ${customer}`:""} 👋`,
+    update.body,
+    "",
+    "━━━━━━━━━━━━━━━━━━",
+    `📦 *Folio LOBO:* ${p.folio}`,
+    `🔎 *Número de guía:* ${p.tracking_code}`,
+    `🚚 *Paquetería:* ${p.carrier}`,
+    `📍 *Estado:* ${update.label}`,
+    `🗓️ *Recibido:* ${received}`,
+    "━━━━━━━━━━━━━━━━━━",
+    "",
+    "Para consultar otra vez, responde con tu folio o número de guía.",
+    "_Gracias por confiar en LOBO TELECOM._"
+  ].join("\n");
+}
+async function saveWhatsAppNotification(p, status, result, messageId="") {
   try {
-    await sendWhatsAppText(jid, `Hola${p.recipient_name ? ` ${p.recipient_name}` : ""}. Tu paquete de LOBO TELECOM está ${state}.\nFolio: ${p.folio}\nGuía: ${p.tracking_code}`);
-    return { sent: true };
-  } catch (error) {
-    return { sent: false, reason: error.message.includes("no está conectado") ? "whatsapp_not_connected" : "whatsapp_send_failed" };
+    await pool.query(
+      `INSERT INTO whatsapp_notifications(package_id,package_status,delivery_state,reason,whatsapp_message_id)
+       VALUES($1,$2,$3,$4,$5)`,
+      [p.id,status,result.sent?"sent":result.skipped?"skipped":"failed",result.reason||"",messageId||""]
+    );
+  } catch(error) {
+    console.error("No se pudo registrar el resultado del aviso de WhatsApp:",error.message);
+  }
+}
+async function notifyPackage(p, status) {
+  if (!p.whatsapp_opt_in) {
+    const result={sent:false,skipped:true,reason:"consent_required"};
+    await saveWhatsAppNotification(p,status,result);
+    return result;
+  }
+  if (!p.phone) {
+    const result={sent:false,skipped:true,reason:"phone_missing"};
+    await saveWhatsAppNotification(p,status,result);
+    return result;
+  }
+  const jid = phoneToWhatsAppJid(p.phone);
+  if (!jid) {
+    const result={sent:false,skipped:true,reason:"invalid_phone"};
+    await saveWhatsAppNotification(p,status,result);
+    return result;
+  }
+  try {
+    const sent=await sendWhatsAppText(jid,packageStatusMessage(p,status));
+    const result={sent:true,reason:"sent"};
+    await saveWhatsAppNotification(p,status,result,sent?.key?.id||"");
+    return result;
+  } catch(error) {
+    const result={sent:false,reason:error.message.includes("no está conectado")?"whatsapp_not_connected":"whatsapp_send_failed"};
+    await saveWhatsAppNotification(p,status,result);
+    return result;
   }
 }
 app.post("/api/admin/packages/:id/notify", auth, asyncRoute(async (req,res) => {
@@ -249,6 +313,14 @@ app.post("/api/admin/packages/:id/notify", auth, asyncRoute(async (req,res) => {
   res.json({ok:true,message:"Solicitud enviada a WhatsApp."});
 }));
 
+app.get("/api/admin/whatsapp/notifications", auth, asyncRoute(async (req,res) => {
+  const {rows}=await pool.query(
+    `SELECT n.id,n.package_status,n.delivery_state,n.reason,n.created_at,n.whatsapp_message_id,p.folio,p.tracking_code
+     FROM whatsapp_notifications n JOIN packages p ON p.id=n.package_id
+     ORDER BY n.created_at DESC LIMIT 25`
+  );
+  res.json({notifications:rows});
+}));
 app.get("/api/admin/whatsapp/status", auth, (req,res) => res.json(whatsappBot.snapshot()));
 app.post("/api/admin/whatsapp/connect", auth, asyncRoute(async (req,res) => {
   try { res.json(await whatsappBot.connect()); }
