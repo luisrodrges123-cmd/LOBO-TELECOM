@@ -1,2 +1,68 @@
-# LOBO-TELECOM
-PAQUTERIA MERCADO LIBRE
+# LOBO TELECOM — Sistema de control de paquetería
+
+Proyecto inicial profesional para recibir, registrar, consultar y entregar paquetes desde LOBO TELECOM.
+
+## Incluye
+- Portal público de consulta por folio o seguimiento + teléfono registrado.
+- Panel privado con login.
+- Alta manual o escaneo de QR/código de barras desde cámara del celular.
+- Folio LOBO automático.
+- Estados: recibido, listo para recoger, entregado e incidencia.
+- PostgreSQL persistente.
+- Notificaciones de WhatsApp Cloud API al registrar y cambiar el estado, cuando se registra consentimiento.
+
+## Importante sobre el escáner
+El lector extrae el contenido del QR/código de barras de la etiqueta. No consulta automáticamente la base privada de Mercado Libre. El paquete queda registrado con su código; el administrador completa nombre y teléfono del destinatario. Para importar datos directamente de Mercado Libre se requiere acceso/integración autorizada.
+
+## Requisitos
+- Node.js 20 o superior.
+- PostgreSQL (por ejemplo, Render PostgreSQL).
+- HTTPS para usar la cámara desde el celular (localhost también funciona).
+
+## Instalación local
+1. Descomprime el ZIP.
+2. Abre una terminal en la carpeta.
+3. Ejecuta `npm install`.
+4. Copia `.env.example` a `.env`.
+5. Completa `DATABASE_URL`, `JWT_SECRET`, `ADMIN_USER=Angelito` y `ADMIN_PASSWORD` (configura la contraseña solo como variable privada; no la subas a GitHub).
+6. Ejecuta `npm start`.
+7. Abre `http://localhost:3000` y el panel en `/admin.html`.
+
+No uses la contraseña de ejemplo. Genera un `JWT_SECRET` largo y único. No subas `.env` a GitHub.
+
+## Despliegue en Render
+- Crea una base PostgreSQL y copia su External Database URL en `DATABASE_URL`.
+- Crea un Web Service conectado al repositorio.
+- Build command: `npm install`
+- Start command: `npm start`
+- Agrega las variables de `.env.example` en Environment.
+- `DATABASE_SSL=true` para una conexión PostgreSQL que requiera SSL.
+- Configura `ALLOWED_ORIGINS` con el dominio real del sitio.
+
+## WhatsApp
+Este proyecto usa WhatsApp Cloud API. Para activarlo:
+1. Crea/configura una app en Meta for Developers y agrega WhatsApp.
+2. Verifica el negocio y registra un número compatible.
+3. Copia el token de acceso y Phone Number ID a `WHATSAPP_TOKEN` y `WHATSAPP_PHONE_NUMBER_ID`. Crea y aprueba la plantilla `package_status` en español con dos variables en el cuerpo: folio y estado; configura `WHATSAPP_TEMPLATE_NAME` y `WHATSAPP_TEMPLATE_LANGUAGE` para que coincidan.
+4. Configura el webhook usando `https://TU-DOMINIO/api/whatsapp/webhook` y el mismo `WHATSAPP_VERIFY_TOKEN`.
+5. Para notificaciones iniciadas por el negocio fuera de la ventana de atención de 24 horas, Meta exige plantillas aprobadas. El envío de texto libre puede ser rechazado por Meta.
+6. El destinatario debe haber dado consentimiento para recibir mensajes.
+
+## Seguridad / pendientes antes de producción
+- El servidor no inicia si `JWT_SECRET` es menor de 32 caracteres o si falta `ADMIN_PASSWORD`.
+- Los avisos automáticos requieren consentimiento registrado, credenciales válidas de Meta y una plantilla aprobada compatible.
+- Genera credenciales únicas y guárdalas únicamente como variables privadas del entorno. No subas `.env`.
+- Activa HTTPS.
+- Añade políticas de privacidad, aviso de tratamiento de datos y consentimiento.
+- Limita el acceso al panel y protege físicamente los paquetes.
+- Configura respaldo automático de PostgreSQL.
+- Implementa un flujo de confirmación de entrega (PIN/firma/identificación) antes de operar a escala.
+- El webhook recibe el evento pero aún no implementa respuestas automáticas entrantes. La consulta pública web sí está implementada.
+- No publiques ni compartas datos personales de destinatarios.
+
+## Cambios de esta versión
+- Los cambios de estado ya no borran los datos opcionales del destinatario.
+- El historial y los cambios del paquete se guardan en una misma transacción.
+- Las credenciales administrativas se comparan en tiempo constante.
+- La política de seguridad del navegador permite cargar el lector QR desde unpkg.
+- Los avisos automáticos y manuales usan una plantilla aprobada de WhatsApp.
