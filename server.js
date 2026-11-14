@@ -29,7 +29,7 @@ app.use(cors({ origin: (origin, cb) => {
   if (!origin || origins.includes("*") || origins.includes(origin)) return cb(null, true);
   return cb(new Error("Origen no permitido por CORS"));
 }}));
-app.use(express.json({ limit: "30kb" }));
+app.use(express.json({ limit: "30kb", verify: (req, res, buf) => { req.rawBody = Buffer.from(buf); } }));
 app.use(express.static("public"));
 app.use("/api", rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: "draft-7", legacyHeaders: false }));
 
@@ -71,6 +71,10 @@ async function dbInit() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE packages ADD COLUMN IF NOT EXISTS whatsapp_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE TABLE IF NOT EXISTS whatsapp_processed_messages (
+      message_id TEXT PRIMARY KEY,
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
 }
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
@@ -225,6 +229,13 @@ async function sendWhatsApp(to, message) {
   if (!response.ok) throw new Error(data.error?.message || "No se pudo enviar WhatsApp.");
   return { configured:true, data };
 }
+async function sendWhatsAppText(to, body) {
+  const result=await sendWhatsApp(to, {
+    messaging_product:"whatsapp", to, type:"text", text:{ preview_url:false, body }
+  });
+  if (!result.configured) throw new Error("WhatsApp Cloud API no está configurada.");
+  return result;
+}
 async function notifyPackage(p, status) {
   if (!p.whatsapp_opt_in || !p.phone) return { sent: false, reason: "consent_required" };
   const state = status === "delivered" ? "entregado" : status === "ready" ? "listo para recoger" : status === "issue" ? "con una incidencia que requiere atención" : "recibido en LOBO TELECOM";
@@ -260,13 +271,75 @@ app.post("/api/admin/packages/:id/notify", auth, asyncRoute(async (req,res) => {
   res.json({ok:true,message:"Solicitud enviada a WhatsApp."});
 }));
 
-// Webhook básico para verificación de Meta; falta configurar la URL en el panel de Meta.
+// Webhook oficial de Meta: valida la firma y atiende consultas por folio o guía.
 app.get("/api/whatsapp/webhook", (req,res) => {
   const mode=req.query["hub.mode"], token=req.query["hub.verify_token"], challenge=req.query["hub.challenge"];
-  if (mode==="subscribe" && token===process.env.WHATSAPP_VERIFY_TOKEN) return res.status(200).send(challenge);
+  if (mode==="subscribe" && process.env.WHATSAPP_VERIFY_TOKEN && token===process.env.WHATSAPP_VERIFY_TOKEN) return res.status(200).send(challenge);
   res.sendStatus(403);
 });
-app.post("/api/whatsapp/webhook", (req,res) => res.sendStatus(200));
+app.get("/api/admin/whatsapp/status", auth, (req,res) => {
+  const base = process.env.RENDER_EXTERNAL_URL || "";
+  res.json({
+    configured: Boolean(process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID && process.env.WHATSAPP_VERIFY_TOKEN && process.env.WHATSAPP_APP_SECRET),
+    webhookUrl: base ? `${base}/api/whatsapp/webhook` : "/api/whatsapp/webhook",
+    hasToken: Boolean(process.env.WHATSAPP_TOKEN),
+    hasPhoneNumberId: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
+    hasVerifyToken: Boolean(process.env.WHATSAPP_VERIFY_TOKEN),
+    hasAppSecret: Boolean(process.env.WHATSAPP_APP_SECRET),
+    templateConfigured: Boolean(process.env.WHATSAPP_TEMPLATE_NAME)
+  });
+});
+function validMetaSignature(req) {
+  const secret = process.env.WHATSAPP_APP_SECRET;
+  const signature = req.get("x-hub-signature-256") || "";
+  if (!secret || !req.rawBody || !/^sha256=[a-f0-9]{64}$/i.test(signature)) return false;
+  const expected = `sha256=${crypto.createHmac("sha256", secret).update(req.rawBody).digest("hex")}`;
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+function whatsappHelpText() {
+  return `¡Hola! Soy el asistente de LOBO TELECOM. Para consultar tu paquete, envíame tu folio LOBO (ej. LT-261114-ABC123) o tu número de seguimiento desde este mismo teléfono.
+
+También puedes consultar en nuestra página pública.`;
+}
+async function replyToPackageLookup(sender, text) {
+  const reference = clean(text, 120).trim().toUpperCase();
+  if (!reference || /^(HOLA|BUENAS|AYUDA|MENU|MENÚ|INFO|INICIO|START|ESTADO)$/i.test(reference)) {
+    return sendWhatsAppText(sender, whatsappHelpText());
+  }
+  const { rows } = await pool.query(
+    `SELECT folio,tracking_code,carrier,status,received_at FROM packages
+     WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'),10)=right($1,10) AND (UPPER(folio)=$2 OR UPPER(tracking_code)=$2)
+     ORDER BY created_at DESC LIMIT 1`, [normalizePhone(sender), reference]
+  );
+  if (!rows.length) return sendWhatsAppText(sender,
+    "No encontré un paquete asociado a este número con ese folio o seguimiento. Verifica el dato y que sea el mismo teléfono registrado, o consulta con tu número y código en la página pública de LOBO TELECOM.");
+  const p=rows[0];
+  const state=p.status==="ready" ? "está listo para recoger" : p.status==="delivered" ? "ya fue entregado" : p.status==="issue" ? "tiene una incidencia; por favor comunícate con LOBO TELECOM" : "fue recibido en LOBO TELECOM";
+  const date=new Intl.DateTimeFormat("es-MX",{dateStyle:"medium",timeZone:"America/Chihuahua"}).format(new Date(p.received_at));
+  return sendWhatsAppText(sender, `LOBO TELECOM 📦\nFolio: ${p.folio}\nGuía: ${p.tracking_code}\nPaquetería: ${p.carrier}\nEstado: ${state}.\nRecibido: ${date}`);
+}
+async function handleWhatsAppWebhook(req,res) {
+  if (!validMetaSignature(req)) return res.sendStatus(process.env.WHATSAPP_APP_SECRET ? 401 : 503);
+  const events=(req.body?.entry||[]).flatMap(entry=>entry.changes||[]).flatMap(change=>change.value?.messages||[]);
+  try {
+    for (const message of events) {
+      if (!message.id || !message.from) continue;
+      const { rows }=await pool.query("INSERT INTO whatsapp_processed_messages(message_id) VALUES($1) ON CONFLICT DO NOTHING RETURNING message_id",[message.id]);
+      if (!rows.length) continue;
+      const body=message.type==="text" ? message.text?.body : "";
+      try { await replyToPackageLookup(message.from, body); }
+      catch (error) {
+        await pool.query("DELETE FROM whatsapp_processed_messages WHERE message_id=$1",[message.id]);
+        throw error;
+      }
+    }
+    res.sendStatus(200);
+  } catch(error) {
+    console.error("No se pudo procesar un mensaje entrante de WhatsApp:",error);
+    res.sendStatus(500);
+  }
+}
+app.post("/api/whatsapp/webhook", handleWhatsAppWebhook);
 
 app.use((err,req,res,next) => {
   if (err.message === "Origen no permitido por CORS") return res.status(403).json({ error: "Origen no permitido." });

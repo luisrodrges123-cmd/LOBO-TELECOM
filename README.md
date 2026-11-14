@@ -31,21 +31,22 @@ El lector extrae el contenido del QR/código de barras de la etiqueta. No consul
 No uses la contraseña de ejemplo. Genera un `JWT_SECRET` largo y único. No subas `.env` a GitHub.
 
 ## Despliegue gratuito en Render con Neon
-- Crea un proyecto PostgreSQL gratuito en Neon y copia la cadena de conexión **pooled** del proyecto.
+- Crea un proyecto PostgreSQL gratuito en Neon y copia la cadena de conexión pooled.
 - Usa el Blueprint `render.yaml` para desplegar el Web Service gratuito conectado a este repositorio.
-- Al revisar la sincronización, configura `DATABASE_URL` con la cadena de Neon. No la subas a GitHub.
+- Configura `DATABASE_URL` con la cadena de Neon en Render. No la subas a GitHub.
 - Render genera `JWT_SECRET` y `ADMIN_PASSWORD` de forma segura. Consulta la contraseña en Environment en el panel de Render; el usuario es `Angelito`.
 - `DATABASE_SSL=true` está configurado en el Blueprint.
 - Render gratuito puede suspender la web tras inactividad; Neon Free tiene límites mensuales y puede suspender conexiones al agotarlos.
-
 ## WhatsApp
 Este proyecto usa WhatsApp Cloud API. Para activarlo:
 1. Crea/configura una app en Meta for Developers y agrega WhatsApp.
 2. Verifica el negocio y registra un número compatible.
 3. Copia el token de acceso y Phone Number ID a `WHATSAPP_TOKEN` y `WHATSAPP_PHONE_NUMBER_ID`. Crea y aprueba la plantilla `package_status` en español con dos variables en el cuerpo: folio y estado; configura `WHATSAPP_TEMPLATE_NAME` y `WHATSAPP_TEMPLATE_LANGUAGE` para que coincidan.
-4. Configura el webhook usando `https://TU-DOMINIO/api/whatsapp/webhook` y el mismo `WHATSAPP_VERIFY_TOKEN`.
-5. Para notificaciones iniciadas por el negocio fuera de la ventana de atención de 24 horas, Meta exige plantillas aprobadas. El envío de texto libre puede ser rechazado por Meta.
-6. El destinatario debe haber dado consentimiento para recibir mensajes.
+4. En Meta configura el webhook en `https://TU-DOMINIO/api/whatsapp/webhook`, con `WHATSAPP_VERIFY_TOKEN`, y suscríbete al evento `messages`. Agrega también `WHATSAPP_APP_SECRET` (App Secret de Meta) como variable privada para validar la firma de cada evento.
+5. El bot oficial responde al folio o número de guía que el cliente envíe desde el mismo teléfono registrado. También contesta saludos con instrucciones; limita los resultados al estado, folio y guía del cliente.
+6. El panel de administración muestra el estado de configuración y la URL del webhook. Esta conexión oficial se configura con credenciales de Meta; no se vincula por QR.
+7. Para notificaciones iniciadas por el negocio fuera de la ventana de atención de 24 horas, Meta exige plantillas aprobadas. El envío de texto libre puede ser rechazado por Meta.
+8. El destinatario debe haber dado consentimiento para recibir mensajes.
 
 ## Seguridad / pendientes antes de producción
 - El servidor no inicia si `JWT_SECRET` es menor de 32 caracteres o si falta `ADMIN_PASSWORD`.
@@ -56,7 +57,7 @@ Este proyecto usa WhatsApp Cloud API. Para activarlo:
 - Limita el acceso al panel y protege físicamente los paquetes.
 - Configura respaldo automático de PostgreSQL.
 - Implementa un flujo de confirmación de entrega (PIN/firma/identificación) antes de operar a escala.
-- El webhook recibe el evento pero aún no implementa respuestas automáticas entrantes. La consulta pública web sí está implementada.
+- El webhook valida la firma con `WHATSAPP_APP_SECRET`, evita procesar dos veces el mismo mensaje y responde consultas entrantes de WhatsApp por folio o seguimiento, verificando el teléfono remitente.
 - No publiques ni compartas datos personales de destinatarios.
 
 ## Cambios de esta versión

@@ -3,7 +3,7 @@ let token=localStorage.getItem("lobo_admin_token")||"";
 let scanner=null, scanning=false, packages=[];
 const headers=()=>({"Content-Type":"application/json","Authorization":`Bearer ${token}`});
 function message(el,text,error=false){el.textContent=text;el.className="result "+(error?"error":"success");}
-function showDashboard(){ $("#loginView").hidden=true; $("#dashboard").hidden=false; loadPackages(); }
+function showDashboard(){ $("#loginView").hidden=true; $("#dashboard").hidden=false; loadPackages(); loadWhatsAppStatus(); }
 if(token) showDashboard();
 $("#loginForm").addEventListener("submit",async e=>{
  e.preventDefault(); const out=$("#loginMsg"); message(out,"Validando acceso...");
@@ -12,6 +12,12 @@ $("#loginForm").addEventListener("submit",async e=>{
 });
 $("#logoutBtn").onclick=()=>{localStorage.removeItem("lobo_admin_token");token="";$("#dashboard").hidden=true;$("#loginView").hidden=false;};
 async function api(url,opts={}){const r=await fetch(url,{...opts,headers:{...headers(),...(opts.headers||{})}});const d=await r.json();if(r.status===401){$("#logoutBtn").click();throw Error("Tu sesión expiró.");}if(!r.ok)throw Error(d.error||"Error en la solicitud.");return d;}
+async function loadWhatsAppStatus(){
+ try{const d=await api("/api/admin/whatsapp/status");const badge=$("#botBadge"),status=$("#botStatus");$("#botWebhook").textContent=d.webhookUrl;
+  if(d.configured){badge.textContent="API configurada";badge.classList.add("bot-ready");status.textContent="El webhook está listo para recibir consultas. Verifica en Meta que esté suscrito a messages.";}
+  else{badge.textContent="Faltan credenciales";status.textContent="El bot ya está preparado, pero necesita las credenciales privadas de WhatsApp Cloud API en Render.";}
+ }catch(e){$("#botStatus").textContent=e.message;}
+}
 async function loadPackages(){
  try{const q=encodeURIComponent($("#search").value||""),s=encodeURIComponent($("#statusFilter").value||"");const d=await api(`/api/admin/packages?q=${q}&status=${s}`);packages=d.packages;render();}
  catch(e){$("#packageList").innerHTML=`<div class="empty">${e.message}</div>`;}
