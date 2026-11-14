@@ -16,16 +16,6 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: DATABASE_URL
-        fromDatabase:
-          name: lobo-telecom-db
-          property: connectionString
+        sync: false
       - key: DATABASE_SSL
         value: "true"
-
-databases:
-  - name: lobo-telecom-db
-    databaseName: lobo_telecom
-    user: lobo_telecom
-    plan: 0.1c-256mb
-    diskSizeGB: 1
-    region: oregon
