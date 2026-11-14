@@ -14,10 +14,10 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       ...helmet.contentSecurityPolicy.getDefaultDirectives(),
-      scriptSrc: ["'self'", "https://unpkg.com"],
-      connectSrc: ["'self'", "https://unpkg.com"],
-      imgSrc: ["'self'", "data:", "blob:"],
-      workerSrc: ["'self'", "blob:"]
+      "script-src": ["'self'", "https://unpkg.com"],
+      "connect-src": ["'self'", "https://unpkg.com"],
+      "img-src": ["'self'", "data:", "blob:"],
+      "worker-src": ["'self'", "blob:"]
     }
   }
 }));
