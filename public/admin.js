@@ -3,7 +3,7 @@ let token=localStorage.getItem("lobo_admin_token")||"";
 let scanner=null, scanning=false, packages=[];
 const headers=()=>({"Content-Type":"application/json","Authorization":`Bearer ${token}`});
 function message(el,text,error=false){el.textContent=text;el.className="result "+(error?"error":"success");}
-function notificationNote(n){if(!n)return"";if(n.sent)return" WhatsApp aceptó el aviso; la entrega al dispositivo está pendiente de confirmación.";if(n.queued)return" Aviso guardado en cola; se enviará al reconectar WhatsApp.";if(n.reason==="consent_required")return" No se envió WhatsApp: falta autorización del cliente.";if(n.reason==="phone_missing")return" No se envió WhatsApp: falta el teléfono del cliente.";if(n.reason==="whatsapp_not_connected")return" Conecta WhatsApp con el QR para enviar el aviso.";if(n.reason==="invalid_phone")return" No se pudo enviar: el teléfono no es válido.";if(n.reason==="whatsapp_send_failed")return" El aviso no salió; revisa la conexión y consulta el historial.";return"";}
+function notificationNote(n){if(!n)return"";if(n.sent)return" WhatsApp aceptó el aviso; la entrega al dispositivo está pendiente de confirmación.";if(n.queued)return" Aviso en cola; el sistema volverá a intentar enviarlo automáticamente.";if(n.reason==="consent_required")return" No se envió WhatsApp: falta autorización del cliente.";if(n.reason==="phone_missing")return" No se envió WhatsApp: falta el teléfono del cliente.";if(n.reason==="whatsapp_not_connected"||n.reason==="cloud_api_not_configured")return" Configura WhatsApp Business Cloud API en Render.";if(n.reason==="invalid_phone")return" No se pudo enviar: el teléfono no es válido.";if(n.reason==="whatsapp_send_failed")return" El envío falló; revisa el historial y la configuración de Meta.";return"";}
 async function showDashboard(){ try{const session=await api("/api/staff/session");if(session.role!=="admin"){localStorage.removeItem("lobo_admin_token");token="";$("#dashboard").hidden=true;$("#loginView").hidden=false;message($("#loginMsg"),"La sesión guardada pertenece al equipo. Inicia sesión con las credenciales del administrador.",true);return;} $("#loginView").hidden=true; $("#dashboard").hidden=false; loadPackages(); loadWhatsAppStatus(); loadWhatsAppHistory(); loadStaffUsers();}catch(e){if(token)$("#loginMsg").textContent=e.message;} }
 if(token) showDashboard();
 $("#loginForm").addEventListener("submit",async e=>{
@@ -13,13 +13,12 @@ $("#loginForm").addEventListener("submit",async e=>{
 });
 $("#logoutBtn").onclick=()=>{localStorage.removeItem("lobo_admin_token");token="";$("#dashboard").hidden=true;$("#loginView").hidden=false;};
 async function api(url,opts={}){const r=await fetch(url,{...opts,headers:{...headers(),...(opts.headers||{})}});const d=await r.json();if(r.status===401){$("#logoutBtn").click();throw Error("Tu sesión expiró.");}if(!r.ok)throw Error(d.error||"Error en la solicitud.");return d;}
-let waPollTimer=null;
 let waHistoryPollTimer=null;
 async function loadWhatsAppHistory(){
  try{
   const d=await api("/api/admin/whatsapp/notifications"),list=$("#waNotificationHistory");
-  const states={sent:"Aceptado por WhatsApp",accepted:"Aceptado por WhatsApp",delivered:"Entregado al dispositivo",read:"Leído",played:"Reproducido",failed:"Falló",skipped:"Omitido",queued:"En cola",sending:"Enviando"};
-  const reasons={server_accepted_pending_receipt:"Aceptado; esperando confirmación del dispositivo",accepted:"Aceptado por WhatsApp",delivered:"Entregado al dispositivo",read:"El cliente abrió el mensaje",played:"El cliente reprodujo el mensaje",delivery_rejected:"WhatsApp reportó un error de entrega",consent_required:"Sin autorización del cliente",phone_missing:"Falta el teléfono",invalid_phone:"Teléfono no válido",whatsapp_offline_wait:"Esperando conexión QR",retry_scheduled:"Reintento programado",retry_limit_reached:"Requiere revisión manual",manual_retry:"Reintento manual",superseded_by_new_status:"Reemplazado por un estado más reciente",recovered_stale_attempt:"Reintento recuperado tras reinicio",sending:"Envío en curso",sent:"Enviado a WhatsApp"};
+  const states={sent:"Aceptado por WhatsApp",accepted:"Aceptado por Meta",delivered:"Entregado al dispositivo",read:"Leído",played:"Reproducido",failed:"Falló",skipped:"Omitido",queued:"En cola",sending:"Enviando"};
+  const reasons={server_accepted_pending_receipt:"Aceptado; esperando confirmación del dispositivo",accepted:"Aceptado por Meta",delivered:"Entregado al dispositivo",read:"El cliente abrió el mensaje",played:"El cliente reprodujo el mensaje",delivery_rejected:"WhatsApp reportó un error de entrega",consent_required:"Sin autorización del cliente",phone_missing:"Falta el teléfono",invalid_phone:"Teléfono no válido",whatsapp_offline_wait:"Sesión QR desconectada",cloud_api_not_configured:"Falta configuración de Meta",configuration_required:"Falta configuración de Meta",meta_api_rejected:"Meta rechazó la solicitud",meta_delivery_failed:"Meta reportó un fallo de entrega",meta_accepted_pending_receipt:"Meta aceptó; esperando confirmación",retry_scheduled:"Reintento programado",retry_limit_reached:"Requiere revisión manual",manual_retry:"Reintento manual",superseded_by_new_status:"Reemplazado por un estado más reciente",recovered_stale_attempt:"Reintento recuperado tras reinicio",sending:"Envío en curso",sent:"Enviado a WhatsApp"};
   list.innerHTML=d.notifications.length?d.notifications.map(n=>`<article class="wa-history-item"><div class="wa-history-icon ${esc(n.delivery_state)}">${["sent","accepted","delivered","read","played"].includes(n.delivery_state)?"✓":n.delivery_state==="queued"?"↻":n.delivery_state==="sending"?"…":n.delivery_state==="skipped"?"–":"!"}</div><div class="wa-history-copy"><strong>${esc(n.folio)} · ${esc(n.tracking_code)}</strong><span>${esc(labelsForStatus(n.package_status))} · ${esc(reasons[n.reason]||n.reason||"")}${n.attempt_count?` · Intentos: ${n.attempt_count}`:""}${n.last_error?` · ${esc(n.last_error)}`:""}</span></div><div class="wa-history-meta"><b class="wa-state-${esc(n.delivery_state)}">${states[n.delivery_state]||n.delivery_state}</b><time>${new Date(n.created_at).toLocaleString("es-MX")}</time></div></article>`).join(""):'<div class="wa-history-empty">Aún no hay avisos registrados.</div>';
  }catch(e){$("#waNotificationHistory").innerHTML=`<div class="wa-history-empty">${esc(e.message)}</div>`;}
  finally{if(waHistoryPollTimer)clearTimeout(waHistoryPollTimer);waHistoryPollTimer=setTimeout(loadWhatsAppHistory,10000);}
@@ -27,31 +26,16 @@ async function loadWhatsAppHistory(){
 function labelsForStatus(status){return({received:"Recibido",ready:"Listo para recoger",delivered:"Entregado",issue:"Incidencia"})[status]||status;}
 async function loadWhatsAppStatus(){
  try{
-  const d=await api("/api/admin/whatsapp/status"),badge=$("#botBadge"),status=$("#botStatus"),qr=$("#botQr"),placeholder=$("#botQrPlaceholder"),connect=$("#connectWhatsapp"),disconnect=$("#disconnectWhatsapp");
-  badge.textContent=d.state==="connected"?"Conectado":d.state==="qr"?"Esperando escaneo":d.state==="connecting"||d.state==="reconnecting"?"Conectando…":d.state==="error"?"Revisar configuración":"Desconectado";
-  badge.classList.toggle("bot-ready",d.state==="connected");
-  status.textContent=d.configured?(d.message||""):"Falta la llave privada de cifrado en Render. Agrégala para habilitar la conexión QR.";
-  if(d.phone&&d.state==="connected")status.textContent=`Conectado al número terminado en ${d.phone.slice(-4)}. El bot está listo para responder consultas.`;
-  if(d.qr){qr.src=d.qr;qr.hidden=false;placeholder.hidden=true;}else{qr.removeAttribute("src");qr.hidden=true;placeholder.hidden=false;}
-  connect.disabled=!d.configured||["connecting","reconnecting"].includes(d.state);
-  connect.textContent=d.state==="qr"?"Actualizar QR":d.state==="connected"?"Conectado":"Generar QR";
-  disconnect.hidden=d.state==="disconnected"||d.state==="error";
-  if(waPollTimer)clearTimeout(waPollTimer);
-  if(["qr","connecting","reconnecting"].includes(d.state))waPollTimer=setTimeout(loadWhatsAppStatus,2000);
+  const d=await api("/api/admin/whatsapp/status"),badge=$("#botBadge"),status=$("#botStatus");
+  badge.textContent=d.configured?"API lista":"Configurar Meta";
+  badge.classList.toggle("bot-ready",d.configured);
+  status.textContent=d.configured?"La API oficial está lista para enviar plantillas aprobadas.":`Faltan estas variables privadas en Render: ${(d.missing||[]).join(", ")||"configuración de Meta"}.`;
+  $("#waWebhookUrl").textContent=d.webhookUrl||"/api/whatsapp/webhook";
+  $("#waWebhookStatus").textContent=d.webhookConfigured?"Webhook protegido y listo para recibir mensajes y confirmaciones de entrega.":`Para respuestas automáticas y acuses de entrega faltan: ${(d.webhookMissing||[]).join(", ")}. Configura la URL del webhook en Meta.`;
  }catch(e){$("#botStatus").textContent=e.message;}
 }
 $("#refreshWaHistory").onclick=loadWhatsAppHistory;
-$("#retryWaQueue").addEventListener("click",async()=>{const button=$("#retryWaQueue");button.disabled=true;try{const d=await api("/api/admin/whatsapp/retry-queue",{method:"POST",body:"{}"});message($("#botStatus"),d.message,!d.connected);await loadWhatsAppHistory();}catch(e){message($("#botStatus"),e.message,true);}finally{button.disabled=false;}});
-$("#connectWhatsapp").addEventListener("click",async()=>{
- const button=$("#connectWhatsapp");button.disabled=true;message($("#botStatus"),"Preparando la conexión segura con WhatsApp…");
- try{await api("/api/admin/whatsapp/connect",{method:"POST",body:"{}"});await loadWhatsAppStatus();}
- catch(e){message($("#botStatus"),e.message,true);button.disabled=false;}
-});
-$("#disconnectWhatsapp").addEventListener("click",async()=>{
- if(!confirm("¿Desconectar WhatsApp y borrar la sesión vinculada del servidor?"))return;
- try{await api("/api/admin/whatsapp/disconnect",{method:"POST",body:"{}"});await loadWhatsAppStatus();}
- catch(e){message($("#botStatus"),e.message,true);}
-});
+$("#retryWaQueue").addEventListener("click",async()=>{const button=$("#retryWaQueue");button.disabled=true;try{const d=await api("/api/admin/whatsapp/retry-queue",{method:"POST",body:"{}"});message($("#botStatus"),d.message,!d.configured);await loadWhatsAppHistory();}catch(e){message($("#botStatus"),e.message,true);}finally{button.disabled=false;}});
 async function loadPackages(){
  try{const q=encodeURIComponent($("#search").value||""),s=encodeURIComponent($("#statusFilter").value||"");const d=await api(`/api/admin/packages?q=${q}&status=${s}`);packages=d.packages;render();}
  catch(e){$("#packageList").innerHTML=`<div class="empty">${e.message}</div>`;}
