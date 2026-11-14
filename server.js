@@ -332,25 +332,34 @@ app.post("/api/admin/whatsapp/connect", auth, asyncRoute(async (req,res) => {
 app.post("/api/admin/whatsapp/disconnect", auth, asyncRoute(async (req,res) => res.json(await whatsappBot.disconnect())));
 
 function whatsappHelpText() {
-  return "¡Hola! Soy el asistente de LOBO TELECOM 📦\n\nPara consultar tu paquete, envíame tu folio LOBO o número de seguimiento desde este mismo teléfono.\nEjemplo: LT-261114-ABC123\n\nTambién puedes usar la página pública de consulta.";
+  return "¡Hola! Soy el asistente de LOBO TELECOM 📦\n\nPara consultar tu paquete, envíame tu folio LOBO o número de seguimiento desde este mismo teléfono.\nEjemplo: LT-261114-ABC123\nTambién puedes escribir: Folio: LT-261114-ABC123 o Guía: ABC123456789.\n\nEscribe AYUDA para ver estas instrucciones.";
+}
+function normalizeWhatsAppReference(text) {
+  const raw=clean(text,180).toUpperCase();
+  const lobo=raw.match(/\bLT[\s-]?\d{6}[\s-]?[A-Z0-9]{6}\b/);
+  if(lobo)return lobo[0].replace(/[^A-Z0-9]/g,"");
+  const labeled=raw.match(/(?:FOLIO|GU[IÍ]A|SEGUIMIENTO|TRACKING|C[ÓO]DIGO)\s*(?:(?:ES|N[ÚU]MERO|NUMERO|NO\.?|:|#)\s*)?([A-Z0-9][A-Z0-9-]{4,59})/);
+  if(labeled)return labeled[1].replace(/[^A-Z0-9]/g,"");
+  return raw.replace(/[^A-Z0-9]/g,"");
 }
 async function handleIncomingWhatsAppMessage(jid, senderPhone, text) {
-  const reference = clean(text, 120).trim().toUpperCase();
-  if (!reference || /^(HOLA|BUENAS|AYUDA|MENU|MENÚ|INFO|INICIO|START|ESTADO|CONSULTAR)$/i.test(reference)) {
+  const reference = normalizeWhatsAppReference(text);
+  if (!reference || /^(HOLA|BUENAS|AYUDA|MENU|INFO|INICIO|START|ESTADO|CONSULTAR|RASTREAR|PAQUETE|FOLIO|GUIA|SEGUIMIENTO|TRACKING)$/i.test(reference)) {
     return sendWhatsAppText(jid, whatsappHelpText());
   }
   const { rows } = await pool.query(
     `SELECT folio,tracking_code,carrier,status,received_at FROM packages
-     WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'),10)=right($1,10)
-       AND (UPPER(folio)=$2 OR UPPER(tracking_code)=$2)
+     WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'),10)=right(regexp_replace($1, '[^0-9]', '', 'g'),10)
+       AND (regexp_replace(upper(folio), '[^A-Z0-9]', '', 'g')=$2
+         OR regexp_replace(upper(tracking_code), '[^A-Z0-9]', '', 'g')=$2)
      ORDER BY created_at DESC LIMIT 1`, [normalizePhone(senderPhone), reference]
   );
   if (!rows.length) return sendWhatsAppText(jid,
-    "No encontré un paquete asociado a este número con ese folio o seguimiento. Verifica el dato y que sea el mismo teléfono registrado, o consulta en la página pública de LOBO TELECOM.");
+    "No pude hacer coincidir el folio o la guía con el teléfono desde el que escribes. Envía solo el folio o número de seguimiento y verifica que el paquete tenga registrado este mismo número de WhatsApp. Por privacidad no puedo mostrar paquetes asociados a otro teléfono.");
   const p=rows[0];
-  const state=p.status==="ready" ? "está listo para recoger" : p.status==="delivered" ? "ya fue entregado" : p.status==="issue" ? "tiene una incidencia; comunícate con LOBO TELECOM" : "fue recibido en LOBO TELECOM";
+  const state=p.status==="ready" ? "está listo para recoger" : p.status==="delivered" ? "ya fue entregado" : p.status==="issue" ? "tiene una incidencia; nuestro equipo dará seguimiento" : "fue recibido en LOBO TELECOM";
   const date=new Intl.DateTimeFormat("es-MX",{dateStyle:"medium",timeZone:"America/Chihuahua"}).format(new Date(p.received_at));
-  return sendWhatsAppText(jid, `LOBO TELECOM 📦\nFolio: ${p.folio}\nGuía: ${p.tracking_code}\nPaquetería: ${p.carrier}\nEstado: ${state}.\nRecibido: ${date}`);
+  return sendWhatsAppText(jid, `🐺 *LOBO TELECOM*\n_Atención VIP · Seguimiento personalizado_\n\nTu paquete ${state}.\n\n📦 *Folio:* ${p.folio}\n🔎 *Guía:* ${p.tracking_code}\n🚚 *Paquetería:* ${p.carrier}\n🗓️ *Recibido:* ${date}\n\n_Gracias por confiar en LOBO TELECOM._`);
 }
 
 app.use((err,req,res,next) => {
@@ -363,3 +372,4 @@ dbInit().then(() => {
   app.listen(port, () => console.log(`LOBO TELECOM activo en puerto ${port}`));
   void whatsappBot.resume();
 }).catch(err => { console.error("No se pudo iniciar la base de datos:",err); process.exit(1); });
+
