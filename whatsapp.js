@@ -199,7 +199,7 @@ export class WhatsAppBot {
     if (event.type !== "notify") return;
     for (const message of event.messages || []) {
       if (message.key?.fromMe || !message.key?.id || !message.message) continue;
-      const jid = message.key.remoteJidAlt || message.key.remoteJid;
+      const jid = message.key.remoteJidAlt || message.key.participantAlt || message.key.remoteJid;
       if (!jid || jid === "status@broadcast" || jid.endsWith("@g.us") || jid.endsWith("@newsletter")) continue;
       const sender = String(jid).split("@")[0].split(":")[0];
       const content = message.message.ephemeralMessage?.message || message.message.viewOnceMessage?.message || message.message;
@@ -250,3 +250,4 @@ export function phoneToWhatsAppJid(value) {
   if (digits.length === 13 && digits.startsWith("521")) digits = `52${digits.slice(-10)}`;
   return digits ? `${digits}@s.whatsapp.net` : "";
 }
+
