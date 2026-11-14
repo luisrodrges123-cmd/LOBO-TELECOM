@@ -486,10 +486,17 @@ function normalizeWhatsAppReference(text) {
   if(labeled)return labeled[1].replace(/[^A-Z0-9]/g,"");
   return raw.replace(/[^A-Z0-9]/g,"");
 }
-async function handleIncomingWhatsAppMessage(jid, senderPhone, text) {
+async function handleIncomingWhatsAppMessage(jid, senderPhone, text, alternateJid="") {
+  const reply = async body => {
+    try { return await sendWhatsAppText(jid, body); }
+    catch (error) {
+      if (alternateJid && alternateJid !== jid && /No sessions/i.test(error.message || "")) return sendWhatsAppText(alternateJid, body);
+      throw error;
+    }
+  };
   const reference = normalizeWhatsAppReference(text);
   if (!reference || /^(HOLA|BUENAS|AYUDA|MENU|INFO|INICIO|START|ESTADO|CONSULTAR|RASTREAR|PAQUETE|FOLIO|GUIA|SEGUIMIENTO|TRACKING)$/i.test(reference)) {
-    return sendWhatsAppText(jid, whatsappHelpText());
+    return reply(whatsappHelpText());
   }
   const { rows } = await pool.query(
     `SELECT folio,tracking_code,carrier,status,received_at FROM packages
@@ -498,12 +505,12 @@ async function handleIncomingWhatsAppMessage(jid, senderPhone, text) {
          OR regexp_replace(upper(tracking_code), '[^A-Z0-9]', '', 'g')=$2)
      ORDER BY created_at DESC LIMIT 1`, [normalizePhone(senderPhone), reference]
   );
-  if (!rows.length) return sendWhatsAppText(jid,
+  if (!rows.length) return reply(
     "No pude hacer coincidir el folio o la guía con el teléfono desde el que escribes. Envía solo el folio o número de seguimiento y verifica que el paquete tenga registrado este mismo número de WhatsApp. Por privacidad no puedo mostrar paquetes asociados a otro teléfono.");
   const p=rows[0];
   const state=p.status==="ready" ? "está listo para recoger" : p.status==="delivered" ? "ya fue entregado" : p.status==="issue" ? "tiene una incidencia; nuestro equipo dará seguimiento" : "fue recibido en LOBO TELECOM";
   const date=new Intl.DateTimeFormat("es-MX",{dateStyle:"medium",timeZone:"America/Chihuahua"}).format(new Date(p.received_at));
-  return sendWhatsAppText(jid, `🐺 *LOBO TELECOM*\n_Atención VIP · Seguimiento personalizado_\n\nTu paquete ${state}.\n\n📦 *Folio:* ${p.folio}\n🔎 *Guía:* ${p.tracking_code}\n🚚 *Paquetería:* ${p.carrier}\n🗓️ *Recibido:* ${date}\n\n_Gracias por confiar en LOBO TELECOM._`);
+  return reply(`🐺 *LOBO TELECOM*\n_Atención VIP · Seguimiento personalizado_\n\nTu paquete ${state}.\n\n📦 *Folio:* ${p.folio}\n🔎 *Guía:* ${p.tracking_code}\n🚚 *Paquetería:* ${p.carrier}\n🗓️ *Recibido:* ${date}\n\n_Gracias por confiar en LOBO TELECOM._`);
 }
 
 app.use((err,req,res,next) => {

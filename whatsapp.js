@@ -209,19 +209,21 @@ export class WhatsAppBot {
     if (event.type !== "notify") return;
     for (const message of event.messages || []) {
       if (message.key?.fromMe || !message.key?.id || !message.message) continue;
-      const jid = message.key.remoteJidAlt || message.key.participantAlt || message.key.remoteJid;
+      const jid = message.key.remoteJid;
+      const alternateJid = message.key.remoteJidAlt || message.key.participantAlt || "";
       if (!jid || jid === "status@broadcast" || jid.endsWith("@g.us") || jid.endsWith("@newsletter")) continue;
-      const sender = String(jid).split("@")[0].split(":")[0];
+      const phoneJid = [alternateJid, jid].find(value => String(value).endsWith("@s.whatsapp.net")) || jid;
+      const sender = String(phoneJid).split("@")[0].split(":")[0];
       const content = message.message.ephemeralMessage?.message || message.message.viewOnceMessage?.message || message.message;
       const text = content.conversation || content.extendedTextMessage?.text || content.imageMessage?.caption || content.videoMessage?.caption || "";
       const id = `${AUTH_PREFIX}message:${message.key.id}`;
       const { rows } = await this.pool.query("INSERT INTO whatsapp_processed_messages(message_id) VALUES($1) ON CONFLICT DO NOTHING RETURNING message_id", [id]);
       if (!rows.length) continue;
       try {
-        await this.onMessage(jid, sender, text);
+        await this.onMessage(jid, sender, text, alternateJid);
       } catch (error) {
         await this.pool.query("DELETE FROM whatsapp_processed_messages WHERE message_id=$1", [id]);
-        console.error("No se pudo responder un mensaje entrante de WhatsApp:", error.message);
+        console.error("No se pudo responder un mensaje entrante de WhatsApp:", error.message, error.stack || "");
       }
     }
   }
