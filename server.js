@@ -5,6 +5,7 @@ import rateLimit from "express-rate-limit";
 import jwt from "jsonwebtoken";
 import pg from "pg";
 import crypto from "crypto";
+import { WhatsAppBot, phoneToWhatsAppJid } from "./whatsapp.js";
 
 const { Pool } = pg;
 const app = express();
@@ -29,7 +30,7 @@ app.use(cors({ origin: (origin, cb) => {
   if (!origin || origins.includes("*") || origins.includes(origin)) return cb(null, true);
   return cb(new Error("Origen no permitido por CORS"));
 }}));
-app.use(express.json({ limit: "30kb", verify: (req, res, buf) => { req.rawBody = Buffer.from(buf); } }));
+app.use(express.json({ limit: "30kb" }));
 app.use(express.static("public"));
 app.use("/api", rateLimit({ windowMs: 60_000, limit: 120, standardHeaders: "draft-7", legacyHeaders: false }));
 
@@ -37,6 +38,8 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined
 });
+const whatsappBot = new WhatsAppBot({ pool, onMessage: handleIncomingWhatsAppMessage });
+
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET || JWT_SECRET.length < 32 || JWT_SECRET.includes("CAMBIA_ESTA")) {
   throw new Error("JWT_SECRET debe tener al menos 32 caracteres y ser único.");
@@ -74,6 +77,11 @@ async function dbInit() {
     CREATE TABLE IF NOT EXISTS whatsapp_processed_messages (
       message_id TEXT PRIMARY KEY,
       received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS whatsapp_auth (
+      id TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 }
@@ -215,49 +223,19 @@ app.post("/api/lookup", rateLimit({ windowMs: 10*60_000, limit: 15 }), asyncRout
   res.json({package:rows[0]});
 }));
 
-async function sendWhatsApp(to, message) {
-  const token = process.env.WHATSAPP_TOKEN;
-  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  if (!token || !phoneId) return { configured:false };
-  const version = process.env.WHATSAPP_API_VERSION || "v27.0";
-  const response = await fetch(`https://graph.facebook.com/${version}/${phoneId}/messages`, {
-    method:"POST",
-    headers:{ Authorization:`Bearer ${token}`, "Content-Type":"application/json" },
-    body:JSON.stringify(message)
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error?.message || "No se pudo enviar WhatsApp.");
-  return { configured:true, data };
-}
 async function sendWhatsAppText(to, body) {
-  const result=await sendWhatsApp(to, {
-    messaging_product:"whatsapp", to, type:"text", text:{ preview_url:false, body }
-  });
-  if (!result.configured) throw new Error("WhatsApp Cloud API no está configurada.");
-  return result;
+  return whatsappBot.sendText(to, body);
 }
 async function notifyPackage(p, status) {
   if (!p.whatsapp_opt_in || !p.phone) return { sent: false, reason: "consent_required" };
+  const jid = phoneToWhatsAppJid(p.phone);
+  if (!jid) return { sent: false, reason: "invalid_phone" };
   const state = status === "delivered" ? "entregado" : status === "ready" ? "listo para recoger" : status === "issue" ? "con una incidencia que requiere atención" : "recibido en LOBO TELECOM";
-  const templateName = process.env.WHATSAPP_TEMPLATE_NAME;
-  if (!templateName) return { sent: false, reason: "whatsapp_template_not_configured" };
   try {
-    const result = await sendWhatsApp(p.phone, {
-      messaging_product: "whatsapp",
-      to: p.phone,
-      type: "template",
-      template: {
-        name: templateName,
-        language: { code: process.env.WHATSAPP_TEMPLATE_LANGUAGE || "es_MX" },
-        components: [{ type: "body", parameters: [
-          { type: "text", text: p.folio },
-          { type: "text", text: state }
-        ] }]
-      }
-    });
-    return result.configured ? { sent: true } : { sent: false, reason: "whatsapp_not_configured" };
-  } catch {
-    return { sent: false, reason: "whatsapp_send_failed" };
+    await sendWhatsAppText(jid, `Hola${p.recipient_name ? ` ${p.recipient_name}` : ""}. Tu paquete de LOBO TELECOM está ${state}.\nFolio: ${p.folio}\nGuía: ${p.tracking_code}`);
+    return { sent: true };
+  } catch (error) {
+    return { sent: false, reason: error.message.includes("no está conectado") ? "whatsapp_not_connected" : "whatsapp_send_failed" };
   }
 }
 app.post("/api/admin/packages/:id/notify", auth, asyncRoute(async (req,res) => {
@@ -267,79 +245,41 @@ app.post("/api/admin/packages/:id/notify", auth, asyncRoute(async (req,res) => {
   if (!p.phone) return res.status(400).json({error:"Agrega el teléfono del destinatario primero."});
   if (!p.whatsapp_opt_in) return res.status(400).json({error:"Registra primero la autorización del destinatario para recibir mensajes por WhatsApp."});
   const result = await notifyPackage(p, p.status);
-  if (!result.sent) return res.status(503).json({error: result.reason === "whatsapp_not_configured" ? "WhatsApp todavía no está configurado. Agrega WHATSAPP_TOKEN y WHATSAPP_PHONE_NUMBER_ID." : result.reason === "whatsapp_template_not_configured" ? "Configura el nombre de una plantilla aprobada de WhatsApp." : "No se pudo enviar el aviso. Revisa la configuración de WhatsApp e inténtalo de nuevo."});
+  if (!result.sent) return res.status(503).json({error: result.reason === "whatsapp_not_connected" ? "Conecta WhatsApp escaneando el QR desde el administrador." : result.reason === "invalid_phone" ? "El teléfono guardado no tiene un formato válido." : "No se pudo enviar el aviso. Revisa la conexión de WhatsApp e inténtalo de nuevo."});
   res.json({ok:true,message:"Solicitud enviada a WhatsApp."});
 }));
 
-// Webhook oficial de Meta: valida la firma y atiende consultas por folio o guía.
-app.get("/api/whatsapp/webhook", (req,res) => {
-  const mode=req.query["hub.mode"], token=req.query["hub.verify_token"], challenge=req.query["hub.challenge"];
-  if (mode==="subscribe" && process.env.WHATSAPP_VERIFY_TOKEN && token===process.env.WHATSAPP_VERIFY_TOKEN) return res.status(200).send(challenge);
-  res.sendStatus(403);
-});
-app.get("/api/admin/whatsapp/status", auth, (req,res) => {
-  const base = process.env.RENDER_EXTERNAL_URL || "";
-  res.json({
-    configured: Boolean(process.env.WHATSAPP_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID && process.env.WHATSAPP_VERIFY_TOKEN && process.env.WHATSAPP_APP_SECRET),
-    webhookUrl: base ? `${base}/api/whatsapp/webhook` : "/api/whatsapp/webhook",
-    hasToken: Boolean(process.env.WHATSAPP_TOKEN),
-    hasPhoneNumberId: Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID),
-    hasVerifyToken: Boolean(process.env.WHATSAPP_VERIFY_TOKEN),
-    hasAppSecret: Boolean(process.env.WHATSAPP_APP_SECRET),
-    templateConfigured: Boolean(process.env.WHATSAPP_TEMPLATE_NAME)
-  });
-});
-function validMetaSignature(req) {
-  const secret = process.env.WHATSAPP_APP_SECRET;
-  const signature = req.get("x-hub-signature-256") || "";
-  if (!secret || !req.rawBody || !/^sha256=[a-f0-9]{64}$/i.test(signature)) return false;
-  const expected = `sha256=${crypto.createHmac("sha256", secret).update(req.rawBody).digest("hex")}`;
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-}
-function whatsappHelpText() {
-  return `¡Hola! Soy el asistente de LOBO TELECOM. Para consultar tu paquete, envíame tu folio LOBO (ej. LT-261114-ABC123) o tu número de seguimiento desde este mismo teléfono.
+app.get("/api/admin/whatsapp/status", auth, (req,res) => res.json(whatsappBot.snapshot()));
+app.post("/api/admin/whatsapp/connect", auth, asyncRoute(async (req,res) => {
+  try { res.json(await whatsappBot.connect()); }
+  catch (error) {
+    console.error("No se pudo iniciar la conexión QR de WhatsApp:", error.message);
+    res.status(503).json({ error: "No se pudo iniciar WhatsApp. Revisa la llave de sesión privada en Render." });
+  }
+}));
+app.post("/api/admin/whatsapp/disconnect", auth, asyncRoute(async (req,res) => res.json(await whatsappBot.disconnect())));
 
-También puedes consultar en nuestra página pública.`;
+function whatsappHelpText() {
+  return "¡Hola! Soy el asistente de LOBO TELECOM 📦\n\nPara consultar tu paquete, envíame tu folio LOBO o número de seguimiento desde este mismo teléfono.\nEjemplo: LT-261114-ABC123\n\nTambién puedes usar la página pública de consulta.";
 }
-async function replyToPackageLookup(sender, text) {
+async function handleIncomingWhatsAppMessage(jid, senderPhone, text) {
   const reference = clean(text, 120).trim().toUpperCase();
-  if (!reference || /^(HOLA|BUENAS|AYUDA|MENU|MENÚ|INFO|INICIO|START|ESTADO)$/i.test(reference)) {
-    return sendWhatsAppText(sender, whatsappHelpText());
+  if (!reference || /^(HOLA|BUENAS|AYUDA|MENU|MENÚ|INFO|INICIO|START|ESTADO|CONSULTAR)$/i.test(reference)) {
+    return sendWhatsAppText(jid, whatsappHelpText());
   }
   const { rows } = await pool.query(
     `SELECT folio,tracking_code,carrier,status,received_at FROM packages
-     WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'),10)=right($1,10) AND (UPPER(folio)=$2 OR UPPER(tracking_code)=$2)
-     ORDER BY created_at DESC LIMIT 1`, [normalizePhone(sender), reference]
+     WHERE right(regexp_replace(phone, '[^0-9]', '', 'g'),10)=right($1,10)
+       AND (UPPER(folio)=$2 OR UPPER(tracking_code)=$2)
+     ORDER BY created_at DESC LIMIT 1`, [normalizePhone(senderPhone), reference]
   );
-  if (!rows.length) return sendWhatsAppText(sender,
-    "No encontré un paquete asociado a este número con ese folio o seguimiento. Verifica el dato y que sea el mismo teléfono registrado, o consulta con tu número y código en la página pública de LOBO TELECOM.");
+  if (!rows.length) return sendWhatsAppText(jid,
+    "No encontré un paquete asociado a este número con ese folio o seguimiento. Verifica el dato y que sea el mismo teléfono registrado, o consulta en la página pública de LOBO TELECOM.");
   const p=rows[0];
-  const state=p.status==="ready" ? "está listo para recoger" : p.status==="delivered" ? "ya fue entregado" : p.status==="issue" ? "tiene una incidencia; por favor comunícate con LOBO TELECOM" : "fue recibido en LOBO TELECOM";
+  const state=p.status==="ready" ? "está listo para recoger" : p.status==="delivered" ? "ya fue entregado" : p.status==="issue" ? "tiene una incidencia; comunícate con LOBO TELECOM" : "fue recibido en LOBO TELECOM";
   const date=new Intl.DateTimeFormat("es-MX",{dateStyle:"medium",timeZone:"America/Chihuahua"}).format(new Date(p.received_at));
-  return sendWhatsAppText(sender, `LOBO TELECOM 📦\nFolio: ${p.folio}\nGuía: ${p.tracking_code}\nPaquetería: ${p.carrier}\nEstado: ${state}.\nRecibido: ${date}`);
+  return sendWhatsAppText(jid, `LOBO TELECOM 📦\nFolio: ${p.folio}\nGuía: ${p.tracking_code}\nPaquetería: ${p.carrier}\nEstado: ${state}.\nRecibido: ${date}`);
 }
-async function handleWhatsAppWebhook(req,res) {
-  if (!validMetaSignature(req)) return res.sendStatus(process.env.WHATSAPP_APP_SECRET ? 401 : 503);
-  const events=(req.body?.entry||[]).flatMap(entry=>entry.changes||[]).flatMap(change=>change.value?.messages||[]);
-  try {
-    for (const message of events) {
-      if (!message.id || !message.from) continue;
-      const { rows }=await pool.query("INSERT INTO whatsapp_processed_messages(message_id) VALUES($1) ON CONFLICT DO NOTHING RETURNING message_id",[message.id]);
-      if (!rows.length) continue;
-      const body=message.type==="text" ? message.text?.body : "";
-      try { await replyToPackageLookup(message.from, body); }
-      catch (error) {
-        await pool.query("DELETE FROM whatsapp_processed_messages WHERE message_id=$1",[message.id]);
-        throw error;
-      }
-    }
-    res.sendStatus(200);
-  } catch(error) {
-    console.error("No se pudo procesar un mensaje entrante de WhatsApp:",error);
-    res.sendStatus(500);
-  }
-}
-app.post("/api/whatsapp/webhook", handleWhatsAppWebhook);
 
 app.use((err,req,res,next) => {
   if (err.message === "Origen no permitido por CORS") return res.status(403).json({ error: "Origen no permitido." });
@@ -347,5 +287,7 @@ app.use((err,req,res,next) => {
   res.status(500).json({error:"Error interno del servidor."});
 });
 const port = Number(process.env.PORT || 3000);
-dbInit().then(() => app.listen(port, () => console.log(`LOBO TELECOM activo en puerto ${port}`)))
-  .catch(err => { console.error("No se pudo iniciar la base de datos:",err); process.exit(1); });
+dbInit().then(() => {
+  app.listen(port, () => console.log(`LOBO TELECOM activo en puerto ${port}`));
+  void whatsappBot.resume();
+}).catch(err => { console.error("No se pudo iniciar la base de datos:",err); process.exit(1); });

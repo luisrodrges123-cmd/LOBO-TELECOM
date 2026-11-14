@@ -9,7 +9,7 @@ Proyecto inicial profesional para recibir, registrar, consultar y entregar paque
 - Folio LOBO automático.
 - Estados: recibido, listo para recoger, entregado e incidencia.
 - PostgreSQL persistente.
-- Notificaciones de WhatsApp Cloud API al registrar y cambiar el estado, cuando se registra consentimiento.
+- Asistente de WhatsApp Web vinculado desde el panel mediante QR, además de avisos de paquetes cuando el destinatario dio consentimiento.
 
 ## Importante sobre el escáner
 El lector extrae el contenido del QR/código de barras de la etiqueta. No consulta automáticamente la base privada de Mercado Libre. El paquete queda registrado con su código; el administrador completa nombre y teléfono del destinatario. Para importar datos directamente de Mercado Libre se requiere acceso/integración autorizada.
@@ -37,16 +37,15 @@ No uses la contraseña de ejemplo. Genera un `JWT_SECRET` largo y único. No sub
 - Render genera `JWT_SECRET` y `ADMIN_PASSWORD` de forma segura. Consulta la contraseña en Environment en el panel de Render; el usuario es `Angelito`.
 - `DATABASE_SSL=true` está configurado en el Blueprint.
 - Render gratuito puede suspender la web tras inactividad; Neon Free tiene límites mensuales y puede suspender conexiones al agotarlos.
-## WhatsApp
-Este proyecto usa WhatsApp Cloud API. Para activarlo:
-1. Crea/configura una app en Meta for Developers y agrega WhatsApp.
-2. Verifica el negocio y registra un número compatible.
-3. Copia el token de acceso y Phone Number ID a `WHATSAPP_TOKEN` y `WHATSAPP_PHONE_NUMBER_ID`. Crea y aprueba la plantilla `package_status` en español con dos variables en el cuerpo: folio y estado; configura `WHATSAPP_TEMPLATE_NAME` y `WHATSAPP_TEMPLATE_LANGUAGE` para que coincidan.
-4. En Meta configura el webhook en `https://TU-DOMINIO/api/whatsapp/webhook`, con `WHATSAPP_VERIFY_TOKEN`, y suscríbete al evento `messages`. Agrega también `WHATSAPP_APP_SECRET` (App Secret de Meta) como variable privada para validar la firma de cada evento.
-5. El bot oficial responde al folio o número de guía que el cliente envíe desde el mismo teléfono registrado. También contesta saludos con instrucciones; limita los resultados al estado, folio y guía del cliente.
-6. El panel de administración muestra el estado de configuración y la URL del webhook. Esta conexión oficial se configura con credenciales de Meta; no se vincula por QR.
-7. Para notificaciones iniciadas por el negocio fuera de la ventana de atención de 24 horas, Meta exige plantillas aprobadas. El envío de texto libre puede ser rechazado por Meta.
-8. El destinatario debe haber dado consentimiento para recibir mensajes.
+## Bot de WhatsApp por QR
+Este proyecto usa Baileys para vincular una sesión de WhatsApp Web desde el administrador; no utiliza Meta Cloud API.
+1. En Render, configura `WHATSAPP_SESSION_ENCRYPTION_KEY` con una llave aleatoria de 32 bytes codificada en base64. No la subas al repositorio ni la compartas. Si cambias esta llave, la sesión guardada no podrá descifrarse y tendrás que volver a vincular el dispositivo.
+2. Abre `/admin.html`, inicia sesión y pulsa **Generar QR**.
+3. En el teléfono del negocio, abre WhatsApp → **Dispositivos vinculados** → **Vincular un dispositivo** y escanea el QR que aparece en el panel.
+4. El panel muestra el estado de conexión. El bot responde consultas por folio o número de seguimiento, solo si el remitente coincide con el teléfono registrado. Los avisos salientes de paquetes siguen requiriendo consentimiento del destinatario.
+5. La sesión y sus claves se guardan cifradas con AES-256-GCM en PostgreSQL, para no depender del disco temporal del hosting.
+
+**Limitaciones:** Baileys es una librería comunitaria, no oficial de WhatsApp ni de Meta. Úsala bajo tu propio criterio, evita mensajes masivos y considera el riesgo de desconexiones o restricciones del número. Render gratuito puede suspender el servicio por inactividad; el bot intentará reconectar al despertar, pero puede tardar. Para operación crítica o comercial a escala, usa la API oficial de WhatsApp Business.
 
 ## Seguridad / pendientes antes de producción
 - El servidor no inicia si `JWT_SECRET` es menor de 32 caracteres o si falta `ADMIN_PASSWORD`.
@@ -57,7 +56,7 @@ Este proyecto usa WhatsApp Cloud API. Para activarlo:
 - Limita el acceso al panel y protege físicamente los paquetes.
 - Configura respaldo automático de PostgreSQL.
 - Implementa un flujo de confirmación de entrega (PIN/firma/identificación) antes de operar a escala.
-- El webhook valida la firma con `WHATSAPP_APP_SECRET`, evita procesar dos veces el mismo mensaje y responde consultas entrantes de WhatsApp por folio o seguimiento, verificando el teléfono remitente.
+- Los mensajes entrantes se procesan una sola vez y las consultas comparan la guía/folio junto con el teléfono de WhatsApp del remitente.
 - No publiques ni compartas datos personales de destinatarios.
 
 ## Cambios de esta versión
@@ -65,4 +64,4 @@ Este proyecto usa WhatsApp Cloud API. Para activarlo:
 - El historial y los cambios del paquete se guardan en una misma transacción.
 - Las credenciales administrativas se comparan en tiempo constante.
 - La política de seguridad del navegador permite cargar el lector QR desde unpkg.
-- Los avisos automáticos y manuales usan una plantilla aprobada de WhatsApp.
+- El panel administrativo permite vincular y desconectar el bot con QR; las credenciales de sesión se cifran en PostgreSQL.
