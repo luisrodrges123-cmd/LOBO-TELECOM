@@ -56,6 +56,7 @@ async function dbInit() {
       folio TEXT UNIQUE NOT NULL,
       recipient_name TEXT DEFAULT '',
       phone TEXT DEFAULT '',
+      recipient_address TEXT DEFAULT '',
       carrier TEXT DEFAULT 'Mercado Libre',
       status TEXT NOT NULL DEFAULT 'received',
       notes TEXT DEFAULT '',
@@ -74,6 +75,12 @@ async function dbInit() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE packages ADD COLUMN IF NOT EXISTS whatsapp_opt_in BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE packages ADD COLUMN IF NOT EXISTS recipient_address TEXT NOT NULL DEFAULT '';
+    CREATE TABLE IF NOT EXISTS staff_users (
+      id BIGSERIAL PRIMARY KEY, username TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('warehouse','courier')), password_hash TEXT NOT NULL,
+      password_salt TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
     CREATE TABLE IF NOT EXISTS whatsapp_processed_messages (
       message_id TEXT PRIMARY KEY,
       received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -103,6 +110,8 @@ function auth(req, res, next) {
     next();
   } catch { res.status(401).json({ error: "Sesión no válida. Inicia sesión nuevamente." }); }
 }
+function adminOnly(req,res,next) { if(req.admin?.role !== 'admin') return res.status(403).json({error:'Esta función es exclusiva del administrador.'}); next(); }
+function roleOnly(role) { return (req,res,next) => req.admin?.role === role ? next() : res.status(403).json({error:'No tienes permiso para esta sección.'}); }
 function clean(v, max=180) { return String(v ?? "").trim().slice(0, max); }
 function normalizePhone(v) { return String(v ?? "").replace(/\D/g, "").slice(-15); }
 function makeFolio() { return "LT-" + new Date().toISOString().slice(2,10).replaceAll("-","") + "-" + crypto.randomBytes(3).toString("hex").toUpperCase(); }
@@ -119,14 +128,34 @@ app.post("/api/admin/login", rateLimit({ windowMs: 15*60_000, limit: 8 }), async
     const b = Buffer.from(right);
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   };
-  if (!same(username, expectedUser) || !same(password, expectedPassword)) {
-    return res.status(401).json({ error:"Usuario o contraseña incorrectos. Configura ADMIN_PASSWORD en el servidor." });
+  if (same(username, expectedUser) && same(password, expectedPassword)) {
+    const token = jwt.sign({ sub: username, role:"admin" }, JWT_SECRET, { expiresIn:"10h" });
+    return res.json({ token, user: username, role:"admin", expiresIn:"10h" });
   }
-  const token = jwt.sign({ sub: username, role:"admin" }, JWT_SECRET, { expiresIn:"10h" });
-  res.json({ token, user: username, expiresIn:"10h" });
+  const {rows}=await pool.query("SELECT username,role,password_hash,password_salt FROM staff_users WHERE lower(username)=lower($1) AND active=TRUE",[username]);
+  const staff=rows[0];
+  let valid=false;
+  if(staff){const candidate=crypto.scryptSync(password,staff.password_salt,64);const saved=Buffer.from(staff.password_hash,"hex");valid=saved.length===candidate.length&&crypto.timingSafeEqual(saved,candidate);}
+  if(!valid)return res.status(401).json({error:"Usuario o contraseña incorrectos."});
+  const token=jwt.sign({sub:staff.username,role:staff.role},JWT_SECRET,{expiresIn:"10h"});
+  res.json({token,user:staff.username,role:staff.role,expiresIn:"10h"});
 }));
 
-app.get("/api/admin/packages", auth, asyncRoute(async (req,res) => {
+app.get("/api/admin/users",auth,adminOnly,asyncRoute(async(req,res)=>{
+  const {rows}=await pool.query("SELECT id,username,display_name,role,active,created_at FROM staff_users ORDER BY created_at DESC");
+  res.json({users:rows});
+}));
+app.post("/api/admin/users",auth,adminOnly,asyncRoute(async(req,res)=>{
+  const username=clean(req.body.username,50).trim(), displayName=clean(req.body.display_name,100).trim();
+  const role=clean(req.body.role,20), password=String(req.body.password||"");
+  if(!/^[a-zA-Z0-9._-]{3,50}$/.test(username)||!displayName||!['warehouse','courier'].includes(role)||password.length<10)
+    return res.status(400).json({error:"Ingresa usuario válido, nombre, rol y contraseña de al menos 10 caracteres."});
+  const salt=crypto.randomBytes(16).toString("hex"), hash=crypto.scryptSync(password,salt,64).toString("hex");
+  try{const {rows}=await pool.query("INSERT INTO staff_users(username,display_name,role,password_hash,password_salt) VALUES($1,$2,$3,$4,$5) RETURNING id,username,display_name,role,active,created_at",[username,displayName,role,hash,salt]);res.status(201).json({user:rows[0]});}
+  catch(error){if(error.code==="23505")return res.status(409).json({error:"Ese nombre de usuario ya existe."});throw error;}
+}));
+
+app.get("/api/admin/packages", auth, adminOnly, asyncRoute(async (req,res) => {
   const q = clean(req.query.q, 100);
   const status = clean(req.query.status, 30);
   const params = [];
@@ -137,10 +166,11 @@ app.get("/api/admin/packages", auth, asyncRoute(async (req,res) => {
   res.json({ packages: rows });
 }));
 
-app.post("/api/admin/packages", auth, asyncRoute(async (req,res) => {
+app.post("/api/admin/packages", auth, adminOnly, asyncRoute(async (req,res) => {
   const tracking = clean(req.body.tracking_code, 120);
   if (!tracking) return res.status(400).json({ error:"El código de seguimiento es obligatorio." });
   const recipient = clean(req.body.recipient_name, 120);
+  const address = clean(req.body.recipient_address, 300);
   const phone = normalizePhone(req.body.phone);
   const carrier = clean(req.body.carrier || "Mercado Libre", 60);
   const notes = clean(req.body.notes, 500);
@@ -152,9 +182,9 @@ app.post("/api/admin/packages", auth, asyncRoute(async (req,res) => {
     try {
       await client.query("BEGIN");
       ({ rows } = await client.query(
-        `INSERT INTO packages(tracking_code,folio,recipient_name,phone,carrier,notes,whatsapp_opt_in,status)
-       VALUES($1,$2,$3,$4,$5,$6,$7,'received') RETURNING *`,
-      [tracking,folio,recipient,phone,carrier,notes,whatsappOptIn]
+        `INSERT INTO packages(tracking_code,folio,recipient_name,phone,recipient_address,carrier,notes,whatsapp_opt_in,status)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,'received') RETURNING *`,
+      [tracking,folio,recipient,phone,address,carrier,notes,whatsappOptIn]
       ));
       await client.query("INSERT INTO package_events(package_id,event,detail) VALUES($1,'received','Paquete registrado por administrador')",[rows[0].id]);
       await client.query("COMMIT");
@@ -172,12 +202,13 @@ app.post("/api/admin/packages", auth, asyncRoute(async (req,res) => {
   }
 }));
 
-app.patch("/api/admin/packages/:id", auth, asyncRoute(async (req,res) => {
+app.patch("/api/admin/packages/:id", auth, adminOnly, asyncRoute(async (req,res) => {
   const id = Number(req.params.id);
   const status = clean(req.body.status, 20);
   if (!Number.isInteger(id) || !["received","ready","delivered","issue"].includes(status)) return res.status(400).json({error:"Datos inválidos."});
   const name = req.body.recipient_name === undefined ? null : clean(req.body.recipient_name,120);
   const phone = req.body.phone === undefined ? null : normalizePhone(req.body.phone);
+  const address = req.body.recipient_address === undefined ? null : clean(req.body.recipient_address,300);
   const notes = req.body.notes === undefined ? null : clean(req.body.notes,500);
   const deliveredAt = status === "delivered" ? "NOW()" : "NULL";
   const client = await pool.connect();
@@ -193,9 +224,9 @@ app.patch("/api/admin/packages/:id", auth, asyncRoute(async (req,res) => {
     }
     ({ rows } = await client.query(
       `UPDATE packages SET status=$1, recipient_name=COALESCE($2,recipient_name), phone=COALESCE($3,phone), notes=COALESCE($4,notes),
-       whatsapp_opt_in=COALESCE($5,whatsapp_opt_in),
-       delivered_at=${deliveredAt}, updated_at=NOW() WHERE id=$6 RETURNING *`,
-      [status,name,phone,notes,req.body.whatsapp_opt_in === undefined ? null : req.body.whatsapp_opt_in === true,id]
+       whatsapp_opt_in=COALESCE($5,whatsapp_opt_in), recipient_address=COALESCE($6,recipient_address),
+       delivered_at=${deliveredAt}, updated_at=NOW() WHERE id=$7 RETURNING *`,
+      [status,name,phone,notes,req.body.whatsapp_opt_in === undefined ? null : req.body.whatsapp_opt_in === true,address,id]
     ));
     if (!rows[0]) {
       await client.query("ROLLBACK");
@@ -302,7 +333,7 @@ async function notifyPackage(p, status) {
     return result;
   }
 }
-app.post("/api/admin/packages/:id/notify", auth, asyncRoute(async (req,res) => {
+app.post("/api/admin/packages/:id/notify", auth, adminOnly, asyncRoute(async (req,res) => {
   const { rows } = await pool.query("SELECT * FROM packages WHERE id=$1",[Number(req.params.id)]);
   const p = rows[0];
   if (!p) return res.status(404).json({error:"Paquete no encontrado."});
@@ -313,7 +344,7 @@ app.post("/api/admin/packages/:id/notify", auth, asyncRoute(async (req,res) => {
   res.json({ok:true,message:"Solicitud enviada a WhatsApp."});
 }));
 
-app.get("/api/admin/whatsapp/notifications", auth, asyncRoute(async (req,res) => {
+app.get("/api/admin/whatsapp/notifications", auth, adminOnly, asyncRoute(async (req,res) => {
   const {rows}=await pool.query(
     `SELECT n.id,n.package_status,n.delivery_state,n.reason,n.created_at,n.whatsapp_message_id,p.folio,p.tracking_code
      FROM whatsapp_notifications n JOIN packages p ON p.id=n.package_id
@@ -321,15 +352,30 @@ app.get("/api/admin/whatsapp/notifications", auth, asyncRoute(async (req,res) =>
   );
   res.json({notifications:rows});
 }));
-app.get("/api/admin/whatsapp/status", auth, (req,res) => res.json(whatsappBot.snapshot()));
-app.post("/api/admin/whatsapp/connect", auth, asyncRoute(async (req,res) => {
+app.get("/api/admin/whatsapp/status", auth, adminOnly, (req,res) => res.json(whatsappBot.snapshot()));
+app.post("/api/admin/whatsapp/connect", auth, adminOnly, asyncRoute(async (req,res) => {
   try { res.json(await whatsappBot.connect()); }
   catch (error) {
     console.error("No se pudo iniciar la conexión QR de WhatsApp:", error.message);
     res.status(503).json({ error: "No se pudo iniciar WhatsApp. Revisa la llave de sesión privada en Render." });
   }
 }));
-app.post("/api/admin/whatsapp/disconnect", auth, asyncRoute(async (req,res) => res.json(await whatsappBot.disconnect())));
+app.post("/api/admin/whatsapp/disconnect", auth, adminOnly, asyncRoute(async (req,res) => res.json(await whatsappBot.disconnect())));
+
+app.get("/api/staff/session",auth,asyncRoute(async(req,res)=>{const {rows}=await pool.query("SELECT display_name FROM staff_users WHERE username=$1 AND active=TRUE",[req.admin.sub]);res.json({role:req.admin.role,user:req.admin.sub,display_name:rows[0]?.display_name||req.admin.sub});}));
+app.post("/api/warehouse/scan",auth,roleOnly("warehouse"),asyncRoute(async(req,res)=>{
+  const code=clean(req.body.tracking_code,120).trim();if(!code)return res.status(400).json({error:"Escanea o escribe un código de seguimiento."});
+  const {rows}=await pool.query("SELECT id,folio,tracking_code,status FROM packages WHERE regexp_replace(upper(tracking_code),'[^A-Z0-9]','','g')=regexp_replace(upper($1),'[^A-Z0-9]','','g') LIMIT 1",[code]);
+  if(!rows.length)return res.status(404).json({error:"No encontramos este paquete. Pide al administrador que lo registre."});
+  const p=rows[0];await pool.query("INSERT INTO package_events(package_id,event,detail) VALUES($1,'warehouse_scan',$2)",[p.id,`Escaneo de almacén por ${req.admin.sub}`]);
+  res.json({package:{folio:p.folio,tracking_code:p.tracking_code,status:p.status},message:"Escaneo registrado en almacén."});
+}));
+app.get("/api/courier/deliveries",auth,roleOnly("courier"),asyncRoute(async(req,res)=>{const {rows}=await pool.query("SELECT id,folio,tracking_code,recipient_name,phone,recipient_address,carrier,status FROM packages WHERE status='ready' ORDER BY updated_at ASC LIMIT 200");res.json({deliveries:rows});}));
+app.post("/api/courier/deliveries/:id/complete",auth,roleOnly("courier"),asyncRoute(async(req,res)=>{
+  const id=Number(req.params.id);if(!Number.isSafeInteger(id))return res.status(400).json({error:"Entrega no válida."});
+  const client=await pool.connect();let rows;try{await client.query("BEGIN");({rows}=await client.query("UPDATE packages SET status='delivered',delivered_at=NOW(),updated_at=NOW() WHERE id=$1 AND status='ready' RETURNING *",[id]));if(!rows[0]){await client.query("ROLLBACK");return res.status(409).json({error:"La entrega ya no está disponible o cambió de estado."});}await client.query("INSERT INTO package_events(package_id,event,detail) VALUES($1,'delivered',$2)",[id,`Entrega confirmada por repartidor ${req.admin.sub}`]);await client.query("COMMIT");}catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+  const notification=await notifyPackage(rows[0],"delivered");res.json({ok:true,notification});
+}));
 
 function whatsappHelpText() {
   return "¡Hola! Soy el asistente de LOBO TELECOM 📦\n\nPara consultar tu paquete, envíame tu folio LOBO o número de seguimiento desde este mismo teléfono.\nEjemplo: LT-261114-ABC123\nTambién puedes escribir: Folio: LT-261114-ABC123 o Guía: ABC123456789.\n\nEscribe AYUDA para ver estas instrucciones.";

@@ -4,11 +4,11 @@ let scanner=null, scanning=false, packages=[];
 const headers=()=>({"Content-Type":"application/json","Authorization":`Bearer ${token}`});
 function message(el,text,error=false){el.textContent=text;el.className="result "+(error?"error":"success");}
 function notificationNote(n){if(!n)return"";if(n.sent)return" Aviso de WhatsApp enviado.";if(n.reason==="consent_required")return" No se envió WhatsApp: falta autorización del cliente.";if(n.reason==="phone_missing")return" No se envió WhatsApp: falta el teléfono del cliente.";if(n.reason==="whatsapp_not_connected")return" Conecta WhatsApp con el QR para enviar el aviso.";if(n.reason==="invalid_phone")return" No se pudo enviar: el teléfono no es válido.";if(n.reason==="whatsapp_send_failed")return" El aviso no salió; revisa la conexión y consulta el historial.";return"";}
-function showDashboard(){ $("#loginView").hidden=true; $("#dashboard").hidden=false; loadPackages(); loadWhatsAppStatus(); loadWhatsAppHistory(); }
+function showDashboard(){ $("#loginView").hidden=true; $("#dashboard").hidden=false; loadPackages(); loadWhatsAppStatus(); loadWhatsAppHistory(); loadStaffUsers(); }
 if(token) showDashboard();
 $("#loginForm").addEventListener("submit",async e=>{
  e.preventDefault(); const out=$("#loginMsg"); message(out,"Validando acceso...");
- try{const r=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:$("#username").value,password:$("#password").value})});const d=await r.json();if(!r.ok)throw Error(d.error);token=d.token;localStorage.setItem("lobo_admin_token",token);showDashboard();}
+ try{const r=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:$("#username").value,password:$("#password").value})});const d=await r.json();if(!r.ok)throw Error(d.error);token=d.token;localStorage.setItem("lobo_admin_token",token);if(d.role!=="admin"){location.href="/staff.html";return;}showDashboard();}
  catch(err){message(out,err.message,true);}
 });
 $("#logoutBtn").onclick=()=>{localStorage.removeItem("lobo_admin_token");token="";$("#dashboard").hidden=true;$("#loginView").hidden=false;};
@@ -57,12 +57,12 @@ function render(){
  const count=s=>packages.filter(p=>p.status===s).length;
  $("#statTotal").textContent=packages.length;$("#statReceived").textContent=count("received");$("#statReady").textContent=count("ready");$("#statDelivered").textContent=count("delivered");
  const labels={received:"Recibido",ready:"Listo para recoger",delivered:"Entregado",issue:"Incidencia"};
- $("#packageList").innerHTML=packages.length?packages.map(p=>`<article class="package-item"><div class="package-top"><div><div class="package-code">${esc(p.folio)}</div><div class="package-meta">${esc(p.tracking_code)}</div></div><span class="status ${p.status}">${labels[p.status]||p.status}</span></div><div class="package-meta">${esc(p.recipient_name||"Destinatario pendiente")} · ${esc(p.phone||"Sin teléfono")}<br>${esc(p.carrier)} · ${new Date(p.received_at).toLocaleString("es-MX")}</div><div class="item-actions"><select aria-label="Cambiar estado" data-status="${p.id}">${Object.entries(labels).map(([v,l])=>`<option value="${v}" ${p.status===v?"selected":""}>${l}</option>`).join("")}</select><button class="btn btn-ghost" data-save="${p.id}">Guardar estado</button><button class="btn btn-ghost" data-notify="${p.id}">Avisar WhatsApp</button></div></article>`).join(""):'<div class="empty">No hay paquetes que coincidan con la búsqueda.</div>';
+ $("#packageList").innerHTML=packages.length?packages.map(p=>`<article class="package-item"><div class="package-top"><div><div class="package-code">${esc(p.folio)}</div><div class="package-meta">${esc(p.tracking_code)}</div></div><span class="status ${p.status}">${labels[p.status]||p.status}</span></div><div class="package-meta">${esc(p.recipient_name||"Destinatario pendiente")} · ${esc(p.phone||"Sin teléfono")}<br>${esc(p.recipient_address||"Sin dirección de entrega")}<br>${esc(p.carrier)} · ${new Date(p.received_at).toLocaleString("es-MX")}</div><div class="item-actions"><select aria-label="Cambiar estado" data-status="${p.id}">${Object.entries(labels).map(([v,l])=>`<option value="${v}" ${p.status===v?"selected":""}>${l}</option>`).join("")}</select><button class="btn btn-ghost" data-save="${p.id}">Guardar estado</button><button class="btn btn-ghost" data-notify="${p.id}">Avisar WhatsApp</button></div></article>`).join(""):'<div class="empty">No hay paquetes que coincidan con la búsqueda.</div>';
 }
 function esc(s){return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 $("#packageForm").addEventListener("submit",async e=>{
  e.preventDefault();const out=$("#saveMsg");message(out,"Guardando paquete...");
- try{const d=await api("/api/admin/packages",{method:"POST",body:JSON.stringify({tracking_code:$("#tracking").value,recipient_name:$("#recipient").value,phone:$("#phone").value,carrier:$("#carrier").value,notes:$("#notes").value,whatsapp_opt_in:$("#whatsappOptIn").checked})});const note=notificationNote(d.notification);message(out,`Paquete guardado. Folio generado: ${d.package.folio}.${note}`);$("#packageForm").reset();await loadPackages();await loadWhatsAppHistory();}
+ try{const d=await api("/api/admin/packages",{method:"POST",body:JSON.stringify({tracking_code:$("#tracking").value,recipient_name:$("#recipient").value,phone:$("#phone").value,recipient_address:$("#address").value,carrier:$("#carrier").value,notes:$("#notes").value,whatsapp_opt_in:$("#whatsappOptIn").checked})});const note=notificationNote(d.notification);message(out,`Paquete guardado. Folio generado: ${d.package.folio}.${note}`);$("#packageForm").reset();await loadPackages();await loadWhatsAppHistory();}
  catch(err){message(out,err.message,true);}
 });
 $("#packageList").addEventListener("click",async e=>{
@@ -92,3 +92,9 @@ $("#startScan").onclick=async()=>{
 async function stopScanner(){if(scanner&&scanning){try{await scanner.stop();await scanner.clear();}catch{}scanning=false;}}
 $("#stopScan").onclick=stopScanner;
 $("#tracking").addEventListener("paste",()=>setTimeout(()=>$("#recipient").focus(),50));
+
+async function loadStaffUsers(){
+ try{const d=await api("/api/admin/users");const list=$("#staffUserList");list.innerHTML=d.users.length?d.users.map(u=>`<article class="staff-user-row"><strong>${esc(u.display_name)}</strong><span>${esc(u.username)}</span><span class="pill">${u.role==="warehouse"?"Almacén":"Repartidor"}</span><span>${u.active?"Activo":"Inactivo"}</span></article>`).join(""):'<p class="tiny">Aún no hay usuarios adicionales.</p>';}
+ catch(e){$("#staffUserList").textContent=e.message;}
+}
+$("#userForm").addEventListener("submit",async e=>{e.preventDefault();const out=$("#userMsg");message(out,"Creando acceso…");try{await api("/api/admin/users",{method:"POST",body:JSON.stringify({display_name:$("#staffName").value,username:$("#staffUsername").value,role:$("#staffRole").value,password:$("#staffPassword").value})});$("#userForm").reset();message(out,"Usuario creado. Comparte las credenciales de forma segura.");await loadStaffUsers();}catch(err){message(out,err.message,true);}});
