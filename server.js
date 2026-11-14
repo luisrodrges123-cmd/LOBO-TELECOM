@@ -123,26 +123,21 @@ function makeFolio() { return "LT-" + new Date().toISOString().slice(2,10).repla
 app.get("/api/health", (req,res) => res.json({ ok:true, service:"LOBO TELECOM Paquetería" }));
 
 app.post("/api/admin/login", rateLimit({ windowMs: 15*60_000, limit: 8 }), asyncRoute(async (req,res) => {
-  const username = clean(req.body.username, 80);
-  const password = String(req.body.password || "");
-  const expectedUser = process.env.ADMIN_USER || "admin";
-  const expectedPassword = process.env.ADMIN_PASSWORD || "";
-  const same = (left, right) => {
-    const a = Buffer.from(left);
-    const b = Buffer.from(right);
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
-  };
-  if (same(username, expectedUser) && same(password, expectedPassword)) {
-    const token = jwt.sign({ sub: username, role:"admin" }, JWT_SECRET, { expiresIn:"10h" });
-    return res.json({ token, user: username, role:"admin", expiresIn:"10h" });
-  }
+  const username=clean(req.body.username,80),password=String(req.body.password||"");
+  const expectedUser=process.env.ADMIN_USER||"admin",expectedPassword=process.env.ADMIN_PASSWORD||"";
+  const same=(left,right)=>{const a=Buffer.from(left),b=Buffer.from(right);return a.length===b.length&&crypto.timingSafeEqual(a,b);};
+  if(!same(username,expectedUser)||!same(password,expectedPassword))return res.status(401).json({error:"Credenciales de administrador incorrectas."});
+  const token=jwt.sign({sub:username,role:"admin"},JWT_SECRET,{expiresIn:"10h"});
+  res.json({token,user:username,role:"admin",expiresIn:"10h"});
+}));
+app.post("/api/staff/login", rateLimit({ windowMs: 15*60_000, limit: 8 }), asyncRoute(async(req,res)=>{
+  const username=clean(req.body.username,80),password=String(req.body.password||"");
   const {rows}=await pool.query("SELECT username,role,password_hash,password_salt FROM staff_users WHERE lower(username)=lower($1) AND active=TRUE",[username]);
-  const staff=rows[0];
-  let valid=false;
-  if(staff){const candidate=crypto.scryptSync(password,staff.password_salt,64);const saved=Buffer.from(staff.password_hash,"hex");valid=saved.length===candidate.length&&crypto.timingSafeEqual(saved,candidate);}
-  if(!valid)return res.status(401).json({error:"Usuario o contraseña incorrectos."});
-  const token=jwt.sign({sub:staff.username,role:staff.role},JWT_SECRET,{expiresIn:"10h"});
-  res.json({token,user:staff.username,role:staff.role,expiresIn:"10h"});
+  const user=rows[0];let valid=false;
+  if(user){const candidate=crypto.scryptSync(password,user.password_salt,64),saved=Buffer.from(user.password_hash,"hex");valid=saved.length===candidate.length&&crypto.timingSafeEqual(saved,candidate);}
+  if(!valid)return res.status(401).json({error:"Usuario o contraseña de equipo incorrectos."});
+  const token=jwt.sign({sub:user.username,role:user.role},JWT_SECRET,{expiresIn:"10h"});
+  res.json({token,user:user.username,role:user.role,expiresIn:"10h"});
 }));
 
 app.get("/api/admin/users",auth,adminOnly,asyncRoute(async(req,res)=>{
