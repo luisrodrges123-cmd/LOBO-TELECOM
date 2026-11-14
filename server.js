@@ -103,10 +103,14 @@ async function dbInit() {
   `);
 }
 const asyncRoute = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-function auth(req, res, next) {
+async function auth(req, res, next) {
   const token = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
   try {
     req.admin = jwt.verify(token, JWT_SECRET);
+    if(req.admin.role !== "admin") {
+      const {rows}=await pool.query("SELECT role FROM staff_users WHERE username=$1 AND active=TRUE",[req.admin.sub]);
+      if(!rows[0] || rows[0].role!==req.admin.role) return res.status(401).json({error:"Esta cuenta ya no tiene acceso. Inicia sesión nuevamente."});
+    }
     next();
   } catch { res.status(401).json({ error: "Sesión no válida. Inicia sesión nuevamente." }); }
 }
@@ -153,6 +157,13 @@ app.post("/api/admin/users",auth,adminOnly,asyncRoute(async(req,res)=>{
   const salt=crypto.randomBytes(16).toString("hex"), hash=crypto.scryptSync(password,salt,64).toString("hex");
   try{const {rows}=await pool.query("INSERT INTO staff_users(username,display_name,role,password_hash,password_salt) VALUES($1,$2,$3,$4,$5) RETURNING id,username,display_name,role,active,created_at",[username,displayName,role,hash,salt]);res.status(201).json({user:rows[0]});}
   catch(error){if(error.code==="23505")return res.status(409).json({error:"Ese nombre de usuario ya existe."});throw error;}
+}));
+
+app.delete("/api/admin/users/:id",auth,adminOnly,asyncRoute(async(req,res)=>{
+  const id=Number(req.params.id);if(!Number.isSafeInteger(id))return res.status(400).json({error:"Usuario no válido."});
+  const {rows}=await pool.query("DELETE FROM staff_users WHERE id=$1 RETURNING username",[id]);
+  if(!rows[0])return res.status(404).json({error:"No se encontró el usuario."});
+  res.json({ok:true,message:`Se eliminó el usuario ${rows[0].username}.`});
 }));
 
 app.get("/api/admin/packages", auth, adminOnly, asyncRoute(async (req,res) => {
@@ -208,7 +219,7 @@ app.patch("/api/admin/packages/:id", auth, adminOnly, asyncRoute(async (req,res)
   if (!Number.isInteger(id) || !["received","ready","delivered","issue"].includes(status)) return res.status(400).json({error:"Datos inválidos."});
   const name = req.body.recipient_name === undefined ? null : clean(req.body.recipient_name,120);
   const phone = req.body.phone === undefined ? null : normalizePhone(req.body.phone);
-  const address = req.body.recipient_address === undefined ? null : clean(req.body.recipient_address,300);
+  const address = req.body.recipient_address === undefined ? null : clean(req.body.recipient_address,1200);
   const notes = req.body.notes === undefined ? null : clean(req.body.notes,500);
   const deliveredAt = status === "delivered" ? "NOW()" : "NULL";
   const client = await pool.connect();
@@ -243,6 +254,13 @@ app.patch("/api/admin/packages/:id", auth, adminOnly, asyncRoute(async (req,res)
   let notification = { sent: false, reason: "status_unchanged" };
   if (status !== previous.status) notification = await notifyPackage(rows[0], status);
   res.json({package:rows[0], notification});
+}));
+
+app.delete("/api/admin/packages/:id",auth,adminOnly,asyncRoute(async(req,res)=>{
+  const id=Number(req.params.id);if(!Number.isSafeInteger(id))return res.status(400).json({error:"Paquete no válido."});
+  const {rows}=await pool.query("DELETE FROM packages WHERE id=$1 RETURNING folio,tracking_code",[id]);
+  if(!rows[0])return res.status(404).json({error:"No se encontró el paquete."});
+  res.json({ok:true,message:`Se eliminó el paquete ${rows[0].folio}.`});
 }));
 
 // Consulta pública: por teléfono devuelve únicamente folio, paquetería, estado y fechas.

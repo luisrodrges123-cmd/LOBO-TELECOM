@@ -66,3 +66,9 @@ Este proyecto usa Baileys para vincular una sesión de WhatsApp Web desde el adm
 - Las credenciales administrativas se comparan en tiempo constante.
 - La política de seguridad del navegador permite cargar el lector QR desde unpkg.
 - El panel administrativo permite vincular y desconectar el bot con QR; las credenciales de sesión se cifran en PostgreSQL.
+
+
+## Mantenimiento del panel
+- El administrador puede eliminar usuarios del equipo y paquetes desde sus tarjetas. Ambas acciones piden confirmación; al quitar un paquete se eliminan también sus eventos e historial de avisos vinculados.
+- La dirección de entrega admite texto o un enlace compartido de Google Maps. El botón del repartidor abre la ruta en Maps; las direcciones en texto se convierten en un destino de ruta.
+- La interfaz administrativa incluye navegación por resumen, registro, inventario, equipo y WhatsApp.
