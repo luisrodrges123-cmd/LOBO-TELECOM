@@ -30,14 +30,13 @@ El lector extrae el contenido del QR/código de barras de la etiqueta. No consul
 
 No uses la contraseña de ejemplo. Genera un `JWT_SECRET` largo y único. No subas `.env` a GitHub.
 
-## Despliegue en Render
-- Crea una base PostgreSQL y copia su External Database URL en `DATABASE_URL`.
-- Crea un Web Service conectado al repositorio.
-- Build command: `npm install`
-- Start command: `npm start`
-- Agrega las variables de `.env.example` en Environment.
-- `DATABASE_SSL=true` para una conexión PostgreSQL que requiera SSL.
-- Configura `ALLOWED_ORIGINS` con el dominio real del sitio.
+## Despliegue gratuito en Render con Neon
+- Crea un proyecto PostgreSQL gratuito en Neon y copia la cadena de conexión **pooled** del proyecto.
+- Usa el Blueprint `render.yaml` para desplegar el Web Service gratuito conectado a este repositorio.
+- Al revisar la sincronización, configura `DATABASE_URL` con la cadena de Neon. No la subas a GitHub.
+- Render genera `JWT_SECRET` y `ADMIN_PASSWORD) de forma segura. Consulta la contraseña en Environment en el panel de Render; el usuario es `Angelito`.
+- `DATABASE_SSL=true` está configurado en el Blueprint.
+- Render gratuito puede suspender la web tras inactividad; Neon Free tiene límites mensuales y puede suspender conexiones al agotarlos.
 
 ## WhatsApp
 Este proyecto usa WhatsApp Cloud API. Para activarlo:
