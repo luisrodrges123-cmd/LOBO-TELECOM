@@ -21,7 +21,10 @@ app.use(helmet({
     }
   }
 }));
-const origins = (process.env.ALLOWED_ORIGINS || "http://localhost:3000").split(",").map(s => s.trim());
+const origins = [
+  ...(process.env.ALLOWED_ORIGINS || "http://localhost:3000").split(",").map(s => s.trim()),
+  process.env.RENDER_EXTERNAL_URL
+].filter(Boolean);
 app.use(cors({ origin: (origin, cb) => {
   if (!origin || origins.includes("*") || origins.includes(origin)) return cb(null, true);
   return cb(new Error("Origen no permitido por CORS"));
