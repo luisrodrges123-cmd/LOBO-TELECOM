@@ -60,9 +60,19 @@ export class WhatsAppCloudClient {
     const number = normalizeWhatsAppNumber(to);
     if (!number) throw new Error("El número del destinatario no es válido.");
     const parameters = [recipient, folio, tracking, status, carrier].map(text => ({ type: "text", text: String(text || "-").slice(0, 1024) }));
+    // The LOBO template has an image header and five positional body parameters.
+    const imageBaseUrl = process.env.RENDER_EXTERNAL_URL || "https://lobo-telecom-i4uk.onrender.com";
+    const headerImageUrl = process.env.WHATSAPP_TEMPLATE_HEADER_IMAGE_URL || new URL("/logo-lobo.png", imageBaseUrl).toString();
     return this.request(number, {
       type: "template",
-      template: { name, language: { code: language }, components: [{ type: "body", parameters }] }
+      template: {
+        name,
+        language: { code: language },
+        components: [
+          { type: "header", parameters: [{ type: "image", image: { link: headerImageUrl } }] },
+          { type: "body", parameters }
+        ]
+      }
     });
   }
 }
