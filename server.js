@@ -79,8 +79,9 @@ async function dbInit() {
     CREATE TABLE IF NOT EXISTS staff_users (
       id BIGSERIAL PRIMARY KEY, username TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('warehouse','courier')), password_hash TEXT NOT NULL,
-      password_salt TEXT NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      password_salt TEXT NOT NULL, can_register_packages BOOLEAN NOT NULL DEFAULT TRUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE staff_users ADD COLUMN IF NOT EXISTS can_register_packages BOOLEAN NOT NULL DEFAULT TRUE;
     CREATE TABLE IF NOT EXISTS whatsapp_processed_messages (
       message_id TEXT PRIMARY KEY,
       received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -119,14 +120,16 @@ async function auth(req, res, next) {
   try {
     req.admin = jwt.verify(token, JWT_SECRET);
     if(req.admin.role !== "admin") {
-      const {rows}=await pool.query("SELECT role FROM staff_users WHERE username=$1 AND active=TRUE",[req.admin.sub]);
+      const {rows}=await pool.query("SELECT role,can_register_packages FROM staff_users WHERE username=$1 AND active=TRUE",[req.admin.sub]);
       if(!rows[0] || rows[0].role!==req.admin.role) return res.status(401).json({error:"Esta cuenta ya no tiene acceso. Inicia sesión nuevamente."});
+      req.admin.can_register_packages=rows[0].role==="warehouse" && rows[0].can_register_packages===true;
     }
     next();
   } catch { res.status(401).json({ error: "Sesión no válida. Inicia sesión nuevamente." }); }
 }
 function adminOnly(req,res,next) { if(req.admin?.role !== 'admin') return res.status(403).json({error:'Esta función es exclusiva del administrador.'}); next(); }
 function roleOnly(role) { return (req,res,next) => req.admin?.role === role ? next() : res.status(403).json({error:'No tienes permiso para esta sección.'}); }
+function warehouseRegisterOnly(req,res,next) { if(req.admin?.role!=="warehouse" || req.admin?.can_register_packages!==true) return res.status(403).json({error:"Tu usuario de almacén no tiene permiso para registrar paquetes."}); next(); }
 function clean(v, max=180) { return String(v ?? "").trim().slice(0, max); }
 function normalizePhone(v) { return String(v ?? "").replace(/\D/g, "").slice(-15); }
 function makeFolio() { return "LT-" + new Date().toISOString().slice(2,10).replaceAll("-","") + "-" + crypto.randomBytes(3).toString("hex").toUpperCase(); }
@@ -152,17 +155,27 @@ app.post("/api/staff/login", rateLimit({ windowMs: 15*60_000, limit: 8 }), async
 }));
 
 app.get("/api/admin/users",auth,adminOnly,asyncRoute(async(req,res)=>{
-  const {rows}=await pool.query("SELECT id,username,display_name,role,active,created_at FROM staff_users ORDER BY created_at DESC");
+  const {rows}=await pool.query("SELECT id,username,display_name,role,active,can_register_packages,created_at FROM staff_users ORDER BY created_at DESC");
   res.json({users:rows});
 }));
 app.post("/api/admin/users",auth,adminOnly,asyncRoute(async(req,res)=>{
   const username=clean(req.body.username,50).trim(), displayName=clean(req.body.display_name,100).trim();
   const role=clean(req.body.role,20), password=String(req.body.password||"");
+  const canRegisterPackages=role==="warehouse" && req.body.can_register_packages!==false;
   if(!/^[a-zA-Z0-9._-]{3,50}$/.test(username)||!displayName||!['warehouse','courier'].includes(role)||password.length<10)
     return res.status(400).json({error:"Ingresa usuario válido, nombre, rol y contraseña de al menos 10 caracteres."});
   const salt=crypto.randomBytes(16).toString("hex"), hash=crypto.scryptSync(password,salt,64).toString("hex");
-  try{const {rows}=await pool.query("INSERT INTO staff_users(username,display_name,role,password_hash,password_salt) VALUES($1,$2,$3,$4,$5) RETURNING id,username,display_name,role,active,created_at",[username,displayName,role,hash,salt]);res.status(201).json({user:rows[0]});}
+  try{const {rows}=await pool.query("INSERT INTO staff_users(username,display_name,role,password_hash,password_salt,can_register_packages) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,username,display_name,role,active,can_register_packages,created_at",[username,displayName,role,hash,salt,canRegisterPackages]);res.status(201).json({user:rows[0]});}
   catch(error){if(error.code==="23505")return res.status(409).json({error:"Ese nombre de usuario ya existe."});throw error;}
+}));
+app.patch("/api/admin/users/:id",auth,adminOnly,asyncRoute(async(req,res)=>{
+  const id=Number(req.params.id),canRegisterPackages=req.body.can_register_packages;
+  if(!Number.isSafeInteger(id)||typeof canRegisterPackages!=="boolean")return res.status(400).json({error:"Indica un permiso de registro válido."});
+  const current=await pool.query("SELECT role FROM staff_users WHERE id=$1",[id]);
+  if(!current.rows[0])return res.status(404).json({error:"No se encontró el usuario."});
+  if(current.rows[0].role!=="warehouse")return res.status(400).json({error:"Este permiso solo se configura para usuarios de almacén."});
+  const {rows}=await pool.query("UPDATE staff_users SET can_register_packages=$2 WHERE id=$1 RETURNING id,username,display_name,role,active,can_register_packages,created_at",[id,canRegisterPackages]);
+  res.json({user:rows[0],message:canRegisterPackages?"Almacén puede registrar paquetes.":"Se quitó el permiso para registrar paquetes."});
 }));
 
 app.delete("/api/admin/users/:id",auth,adminOnly,asyncRoute(async(req,res)=>{
@@ -463,13 +476,36 @@ app.post("/api/whatsapp/webhook", asyncRoute(async (req,res) => {
   res.sendStatus(200);
 }));
 
-app.get("/api/staff/session",auth,asyncRoute(async(req,res)=>{const {rows}=await pool.query("SELECT display_name FROM staff_users WHERE username=$1 AND active=TRUE",[req.admin.sub]);res.json({role:req.admin.role,user:req.admin.sub,display_name:rows[0]?.display_name||req.admin.sub});}));
+app.get("/api/staff/session",auth,asyncRoute(async(req,res)=>{const {rows}=await pool.query("SELECT display_name,can_register_packages FROM staff_users WHERE username=$1 AND active=TRUE",[req.admin.sub]);res.json({role:req.admin.role,user:req.admin.sub,display_name:rows[0]?.display_name||req.admin.sub,can_register_packages:req.admin.role==="warehouse" && rows[0]?.can_register_packages===true});}));
 app.post("/api/warehouse/scan",auth,roleOnly("warehouse"),asyncRoute(async(req,res)=>{
   const code=clean(req.body.tracking_code,120).trim();if(!code)return res.status(400).json({error:"Escanea o escribe un código de seguimiento."});
   const {rows}=await pool.query("SELECT id,folio,tracking_code,status FROM packages WHERE regexp_replace(upper(tracking_code),'[^A-Z0-9]','','g')=regexp_replace(upper($1),'[^A-Z0-9]','','g') LIMIT 1",[code]);
   if(!rows.length)return res.status(404).json({error:"No encontramos este paquete. Pide al administrador que lo registre."});
   const p=rows[0];await pool.query("INSERT INTO package_events(package_id,event,detail) VALUES($1,'warehouse_scan',$2)",[p.id,`Escaneo de almacén por ${req.admin.sub}`]);
   res.json({package:{folio:p.folio,tracking_code:p.tracking_code,status:p.status},message:"Escaneo registrado en almacén."});
+}));
+app.post("/api/warehouse/packages",auth,warehouseRegisterOnly,asyncRoute(async(req,res)=>{
+  const tracking=clean(req.body.tracking_code,120);
+  if(!tracking)return res.status(400).json({error:"El código de seguimiento es obligatorio."});
+  const recipient=clean(req.body.recipient_name,120),address=clean(req.body.recipient_address,300);
+  const phone=normalizePhone(req.body.phone),carrier=clean(req.body.carrier||"Mercado Libre",60),notes=clean(req.body.notes,500);
+  const whatsappOptIn=req.body.whatsapp_opt_in===true,folio=makeFolio();
+  try{
+    const client=await pool.connect();let rows;
+    try{
+      await client.query("BEGIN");
+      ({rows}=await client.query(`INSERT INTO packages(tracking_code,folio,recipient_name,phone,recipient_address,carrier,notes,whatsapp_opt_in,status)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,'received') RETURNING *`,
+      [tracking,folio,recipient,phone,address,carrier,notes,whatsappOptIn]));
+      await client.query("INSERT INTO package_events(package_id,event,detail) VALUES($1,'received',$2)",[rows[0].id,`Paquete registrado por almacén: ${req.admin.sub}`]);
+      await client.query("COMMIT");
+    }catch(error){await client.query("ROLLBACK");throw error;}finally{client.release();}
+    const notification=await notifyPackage(rows[0],"received");
+    res.status(201).json({package:rows[0],notification,message:"Paquete registrado correctamente en almacén."});
+  }catch(error){
+    if(error.code==="23505")return res.status(409).json({error:"Ese número de seguimiento ya está registrado."});
+    throw error;
+  }
 }));
 app.get("/api/courier/deliveries",auth,roleOnly("courier"),asyncRoute(async(req,res)=>{const {rows}=await pool.query("SELECT id,folio,tracking_code,recipient_name,phone,recipient_address,carrier,status FROM packages WHERE status='ready' ORDER BY updated_at ASC LIMIT 200");res.json({deliveries:rows});}));
 app.post("/api/courier/deliveries/:id/complete",auth,roleOnly("courier"),asyncRoute(async(req,res)=>{

@@ -83,10 +83,30 @@ $("#stopScan").onclick=stopScanner;
 $("#tracking").addEventListener("paste",()=>setTimeout(()=>$("#recipient").focus(),50));
 
 async function loadStaffUsers(){
- try{const d=await api("/api/admin/users");const list=$("#staffUserList");list.innerHTML=d.users.length?d.users.map(u=>`<article class="staff-user-row"><strong>${esc(u.display_name)}</strong><span>${esc(u.username)}</span><span class="pill">${u.role==="warehouse"?"Almacén":"Repartidor"}</span><span>${u.active?"Activo":"Inactivo"}</span><button class="btn btn-danger" data-delete-user="${u.id}" data-username="${esc(u.username)}">Eliminar usuario</button></article>`).join(""):'<p class="tiny">Aún no hay usuarios adicionales.</p>';}
- catch(e){$("#staffUserList").textContent=e.message;}
+ try{
+  const d=await api("/api/admin/users"),list=$("#staffUserList");
+  list.innerHTML=d.users.length?d.users.map(u=>`<article class="staff-user-row"><div><strong>${esc(u.display_name)}</strong><div class="tiny">@${esc(u.username)}</div></div><span class="pill">${u.role==="warehouse"?"Almacén":"Repartidor"}</span><span>${u.active?"Activo":"Inactivo"}</span>${u.role==="warehouse"?`<label class="staff-permission-option"><input type="checkbox" data-register-toggle="${u.id}" ${u.can_register_packages?"checked":""}> Puede registrar paquetes</label><button class="btn btn-ghost" data-save-register="${u.id}">Guardar permiso</button>`:'<span class="tiny">Solo entregas</span><span></span>'}<button class="btn btn-danger" data-delete-user="${u.id}" data-username="${esc(u.username)}">Eliminar</button></article>`).join(""):'<p class="tiny">Aún no hay usuarios adicionales.</p>';
+ }catch(e){$("#staffUserList").textContent=e.message;}
 }
-$("#userForm").addEventListener("submit",async e=>{e.preventDefault();const out=$("#userMsg");message(out,"Creando acceso…");try{await api("/api/admin/users",{method:"POST",body:JSON.stringify({display_name:$("#staffName").value,username:$("#staffUsername").value,role:$("#staffRole").value,password:$("#staffPassword").value})});$("#userForm").reset();message(out,"Usuario creado. Comparte las credenciales de forma segura.");await loadStaffUsers();}catch(err){message(out,err.message,true);}});
-
-$("#staffUserList").addEventListener("click",async e=>{const b=e.target.closest("[data-delete-user]");if(!b)return;const name=b.dataset.username;if(!confirm(`¿Eliminar el acceso de ${name}? Su sesión también quedará invalidada.`))return;b.disabled=true;try{await api(`/api/admin/users/${b.dataset.deleteUser}`,{method:"DELETE"});message($("#userMsg"),`Acceso de ${name} eliminado.`);await loadStaffUsers();}catch(err){message($("#userMsg"),err.message,true);b.disabled=false;}});
-
+function syncStaffRegisterPermission(){const role=$("#staffRole").value,wrap=$("#staffRegisterPermissionWrap");wrap.hidden=role!=="warehouse";if(role!=="warehouse")$("#staffCanRegisterPackages").checked=false;}
+$("#staffRole").addEventListener("change",syncStaffRegisterPermission);
+syncStaffRegisterPermission();
+$("#userForm").addEventListener("submit",async e=>{e.preventDefault();const out=$("#userMsg");message(out,"Creando acceso…");try{await api("/api/admin/users",{method:"POST",body:JSON.stringify({display_name:$("#staffName").value,username:$("#staffUsername").value,role:$("#staffRole").value,password:$("#staffPassword").value,can_register_packages:$("#staffRole").value==="warehouse" && $("#staffCanRegisterPackages").checked})});$("#userForm").reset();$("#staffCanRegisterPackages").checked=true;syncStaffRegisterPermission();message(out,"Usuario creado. Comparte las credenciales de forma segura.");await loadStaffUsers();}catch(err){message(out,err.message,true);}});
+$("#staffUserList").addEventListener("click",async e=>{
+ const save=e.target.closest("[data-save-register]");
+ if(save){
+  const id=save.dataset.saveRegister,input=$("#staffUserList").querySelector(`[data-register-toggle="${id}"]`);
+  if(!input)return;
+  save.disabled=true;
+  try{const d=await api(`/api/admin/users/${id}`,{method:"PATCH",body:JSON.stringify({can_register_packages:input.checked})});message($("#userMsg"),d.message);await loadStaffUsers();}
+  catch(err){message($("#userMsg"),err.message,true);save.disabled=false;}
+  return;
+ }
+ const b=e.target.closest("[data-delete-user]");
+ if(!b)return;
+ const name=b.dataset.username;
+ if(!confirm(`¿Eliminar el acceso de ${name}? Su sesión también quedará invalidada.`))return;
+ b.disabled=true;
+ try{await api(`/api/admin/users/${b.dataset.deleteUser}`,{method:"DELETE"});message($("#userMsg"),`Acceso de ${name} eliminado.`);await loadStaffUsers();}
+ catch(err){message($("#userMsg"),err.message,true);b.disabled=false;}
+});
